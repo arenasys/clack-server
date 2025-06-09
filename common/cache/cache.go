@@ -19,8 +19,12 @@ var cacheLog = NewLogger("CACHE")
 var cacheLocks sync.Map
 
 func LogRangeHumanReadable(prefix string, start int64, end int64, total int64) {
-	startf, endf, totalf := float64(start), float64(end), float64(total)
+	if start < 0 || end < 0 || total <= 0 {
+		fmt.Printf("%s: UNKNOWN - UNKNOWN\n", prefix)
+		return
+	}
 
+	startf, endf, totalf := float64(start), float64(end), float64(total)
 	fmt.Printf("%s: %.2f%% - %.2f%%\n", prefix, (100 * startf / totalf), (100 * endf / totalf))
 }
 
@@ -291,8 +295,8 @@ type cacheRequest struct {
 }
 
 func TryServeCached(w http.ResponseWriter, r *http.Request, info cacheRequest) error {
+	fmt.Println("TRY SERVE CACHED")
 	if _, err := os.Stat(info.metaFilePath); err != nil {
-		cacheLog.Printf("Failed to stat cache metadata: %v", err)
 		return err
 	}
 
@@ -367,10 +371,6 @@ func TryServeUncached(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		return fmt.Errorf("origin returned: %d", proxyResp.StatusCode)
 	}
 
-	if proxyResp.StatusCode == http.StatusOK && proxyResp.Header.Get("Content-Length") == "" {
-		return fmt.Errorf("origin sent no content length")
-	}
-
 	if proxyResp.StatusCode == http.StatusPartialContent && proxyResp.Header.Get("Content-Range") == "" {
 		return fmt.Errorf("origin sent no content range")
 	}
@@ -382,7 +382,7 @@ func TryServeUncached(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	contentType := proxyResp.Header.Get("Content-Type")
 	w.Header().Set("Content-Type", contentType)
 
-	var start, end, total int64
+	var start, end, total int64 = 0, -1, -1
 	if proxyResp.StatusCode == http.StatusPartialContent {
 		_, err = fmt.Sscanf(proxyResp.Header.Get("Content-Range"), "bytes %d-%d/%d", &start, &end, &total)
 		if err != nil {
@@ -394,42 +394,47 @@ func TryServeUncached(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", end-start+1))
 		w.WriteHeader(http.StatusPartialContent)
 	} else if proxyResp.StatusCode == http.StatusOK {
-		start, end, total = 0, proxyResp.ContentLength, proxyResp.ContentLength
-
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", total))
+		if proxyResp.ContentLength >= 0 {
+			start, end, total = 0, proxyResp.ContentLength, proxyResp.ContentLength
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", total))
+		}
 		w.WriteHeader(http.StatusOK)
 	} else {
 		return fmt.Errorf("invalid response status: %d", proxyResp.StatusCode)
 	}
 
-	LogRangeHumanReadable("CacheMiss", start, end, total)
+	if total < 0 {
+		fmt.Println("CacheBypass")
+		io.Copy(w, proxyResp.Body)
+	} else {
 
-	os.MkdirAll(filepath.Dir(info.cacheFilePath), 0755)
+		LogRangeHumanReadable("CacheMiss", start, end, total)
+		os.MkdirAll(filepath.Dir(info.cacheFilePath), 0755)
 
-	cacheFile, err := os.OpenFile(info.cacheFilePath, os.O_RDWR|os.O_CREATE, 0666)
-	if err != nil {
-		cacheLog.Printf("Failed to open or create cache file: %v", err)
-		return err
+		cacheFile, err := os.OpenFile(info.cacheFilePath, os.O_RDWR|os.O_CREATE, 0666)
+		if err != nil {
+			cacheLog.Printf("Failed to open or create cache file: %v", err)
+			return err
+		}
+
+		//cacheFile.Truncate(total)
+
+		cacheMiss := &CacheMiss{
+			ReadCloser:   proxyResp.Body,
+			start:        start,
+			end:          end,
+			total:        total,
+			progress:     0,
+			cacheFile:    cacheFile,
+			metaFilePath: info.metaFilePath,
+			lock:         info.lock,
+			contentType:  contentType,
+		}
+
+		io.Copy(w, cacheMiss)
+
+		cacheMiss.Close()
 	}
-
-	//cacheFile.Truncate(total)
-
-	cacheMiss := &CacheMiss{
-		ReadCloser:   proxyResp.Body,
-		start:        start,
-		end:          end,
-		total:        total,
-		progress:     0,
-		cacheFile:    cacheFile,
-		metaFilePath: info.metaFilePath,
-		lock:         info.lock,
-		contentType:  contentType,
-	}
-
-	io.Copy(w, cacheMiss)
-
-	cacheMiss.Close()
-
 	return nil
 }
 
@@ -454,6 +459,7 @@ func ServeExternal(w http.ResponseWriter, r *http.Request, url string) error {
 	if err != nil {
 		err = TryServeUncached(r.Context(), w, r, info)
 		if err != nil {
+			cacheLog.Printf("Failed to serve external content: %v", err)
 			return err
 		}
 	}

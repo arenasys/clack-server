@@ -30,12 +30,12 @@ func (c *GatewayConnection) HandleError(err error) {
 		Type: EventTypeErrorResponse,
 		Data: ErrorResponse{
 			Code:    code,
-			Message: ErrorMessage(code),
+			Request: c.request,
 		},
 	})
 }
 
-func (c *GatewayConnection) HandleSiteRequest(db *sqlite.Conn) {
+func (c *GatewayConnection) HandleSettingsRequest(db *sqlite.Conn) {
 	settings, err := storage.GetSettings(db)
 	if err != nil {
 		c.HandleError(err)
@@ -43,16 +43,17 @@ func (c *GatewayConnection) HandleSiteRequest(db *sqlite.Conn) {
 	}
 
 	preliminary := Event{
-		Type: EventTypeSiteResponse,
-		Data: SiteResponse{
-			SiteName:         settings.SiteName,
-			LoginMessage:     settings.LoginMessage,
-			Authenticated:    c.Authenticated(),
-			UsesEmail:        settings.UsesEmail,
-			UsesInviteCodes:  settings.UsesInviteCodes,
-			UsesCaptcha:      settings.UsesCaptcha,
-			UsesLoginCaptcha: settings.UsesLoginCaptcha,
-			CaptchSiteKey:    settings.CaptchaSiteKey,
+		Type: EventTypeSettingsResponse,
+		Data: SettingsResponse{
+			SiteName:           settings.SiteName,
+			LoginMessage:       settings.LoginMessage,
+			DefaultPermissions: settings.DefaultPermissions,
+			Authenticated:      c.Authenticated(),
+			UsesEmail:          settings.UsesEmail,
+			UsesInviteCodes:    settings.UsesInviteCodes,
+			UsesCaptcha:        settings.UsesCaptcha,
+			UsesLoginCaptcha:   settings.UsesLoginCaptcha,
+			CaptchSiteKey:      settings.CaptchaSiteKey,
 		},
 	}
 
@@ -255,6 +256,21 @@ func (c *GatewayConnection) HandleMessageSendRequest(msg *UnknownEvent, db *sqli
 		return
 	}
 
+	permissions := storage.GetPermissions(db, c.userID, req.ChannelID)
+	canSendMessages := permissions&PermissionSendMessages != 0
+	canEmbedLinks := permissions&PermissionEmbedLinks != 0
+	canUploadFiles := permissions&PermissionUploadFiles != 0
+
+	if !canSendMessages {
+		c.HandleError(NewError(ErrorCodeNoPermission, nil))
+		return
+	}
+
+	if !canUploadFiles && req.AttachmentCount > 0 {
+		c.HandleError(NewError(ErrorCodeNoPermission, nil))
+		return
+	}
+
 	var full Message
 	full.ID = snowflake.New()
 	full.AuthorID = c.userID
@@ -264,6 +280,10 @@ func (c *GatewayConnection) HandleMessageSendRequest(msg *UnknownEvent, db *sqli
 	full.Timestamp = int(time.Now().UnixMilli())
 
 	mentionedUsers, mentionedRoles, mentionedChannels, embeddableURLs := ParseMessageContent(req.Content)
+
+	if !canEmbedLinks {
+		embeddableURLs = nil
+	}
 
 	full.MentionedUsers = mentionedUsers
 	full.MentionedRoles = mentionedRoles
@@ -292,16 +312,18 @@ func (c *GatewayConnection) HandleMessageSendRequest(msg *UnknownEvent, db *sqli
 		c.HandleMessageSendRequestComplete(&full, msg.Seq, db)
 	}
 }
-func (c *GatewayConnection) HandleMessageSendRequestComplete(message *Message, seq string, db *sqlite.Conn) {
-	storage.AddMessage(db, message)
+func (c *GatewayConnection) HandleMessageSendRequestComplete(rawMessage *Message, seq string, db *sqlite.Conn) {
+	storage.AddMessage(db, rawMessage)
+
+	message, err := storage.GetMessage(db, rawMessage.ID)
+
+	message.EmbeddableURLs = rawMessage.EmbeddableURLs
 
 	user, err := storage.GetUser(db, message.AuthorID)
 	if err != nil {
 		c.HandleError(err)
 		return
 	}
-
-	fmt.Println("Relay message")
 
 	c.Write(Event{
 		Type: EventTypeMessageSendResponse,
@@ -312,35 +334,144 @@ func (c *GatewayConnection) HandleMessageSendRequestComplete(message *Message, s
 	})
 
 	gw.OnMessageAdd(&MessageAddEvent{
-		Message: *message,
+		Message: message,
 		Author:  user,
 	})
 
 	if len(message.EmbeddableURLs) > 0 {
-		go func(id Snowflake, urls []string) {
-			for _, url := range urls {
-				embed, err := GetEmbedFromURL(context.Background(), db, url)
-				if err != nil || embed == nil {
-					fmt.Println("Failed to get embed from URL:", err)
-					continue
-				}
-				embed.ID = snowflake.New()
-
-				storage.AddEmbed(db, id, embed)
-
-				message, err := storage.GetMessage(db, id)
-				if err != nil {
-					c.HandleError(err)
-					return
-				}
-
-				gw.Relay(Event{
-					Type: EventTypeMessageUpdate,
-					Data: MessageUpdateEvent{
-						Message: message,
-					},
-				})
-			}
-		}(message.ID, message.EmbeddableURLs)
+		go c.TryEmbedURLs(message.ID, message.EmbeddableURLs, db)
 	}
+}
+
+func (c *GatewayConnection) HandleMessageUpdateRequest(msg *UnknownEvent, db *sqlite.Conn) {
+	var req MessageUpdateRequest
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	full, err := storage.GetMessage(db, req.MessageID)
+	if err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	if full.AuthorID != c.userID {
+		c.HandleError(NewError(ErrorCodeNoPermission, nil))
+		return
+	}
+
+	permissions := storage.GetPermissions(db, c.userID, full.ChannelID)
+	canEmbedLinks := permissions&PermissionEmbedLinks != 0
+
+	mentionedUsers, mentionedRoles, mentionedChannels, embeddableURLs := ParseMessageContent(req.Content)
+
+	deletedEmbeds := make([]Snowflake, 0)
+	addedURLs := make([]string, 0)
+
+	for _, embed := range full.Embeds {
+		found := false
+		for _, url := range embeddableURLs {
+			if embed.URL == url {
+				found = true
+				break
+			}
+		}
+		if !found {
+			deletedEmbeds = append(deletedEmbeds, embed.ID)
+		}
+	}
+
+	for _, id := range embeddableURLs {
+		found := false
+		for _, embed := range full.Embeds {
+			if embed.URL == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			addedURLs = append(addedURLs, id)
+		}
+	}
+
+	if err := storage.UpdateMessage(db, req.MessageID, req.Content, mentionedUsers, mentionedRoles, mentionedChannels, deletedEmbeds); err != nil {
+		c.HandleError(err)
+		return
+	}
+
+	full, err = storage.GetMessage(db, req.MessageID)
+	if err != nil {
+		c.HandleError(err)
+		return
+	}
+
+	full.EmbeddableURLs = addedURLs
+
+	gw.OnMessageUpdate(&MessageUpdateEvent{
+		Message: full,
+	})
+
+	if canEmbedLinks {
+		go c.TryEmbedURLs(req.MessageID, addedURLs, db)
+	}
+
+}
+
+func (c *GatewayConnection) HandleMessageDeleteRequest(msg *UnknownEvent, db *sqlite.Conn) {
+	var req MessageDeleteRequest
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	if msg, err := storage.GetMessage(db, req.MessageID); err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	} else {
+		if msg.AuthorID != c.userID {
+			var permissions = storage.GetPermissions(db, c.userID, msg.ChannelID)
+			if permissions&PermissionManageMessages == 0 {
+				c.HandleError(NewError(ErrorCodeNoPermission, nil))
+				return
+			}
+		}
+	}
+
+	if err := storage.DeleteMessage(db, req.MessageID); err != nil {
+		c.HandleError(err)
+		return
+	}
+
+	gw.Relay(Event{
+		Type: EventTypeMessageDelete,
+		Data: MessageDeleteEvent{
+			MessageID: req.MessageID,
+		},
+	})
+}
+
+func (c *GatewayConnection) TryEmbedURLs(id Snowflake, urls []string, db *sqlite.Conn) {
+	for _, url := range urls {
+		embed, err := GetEmbedFromURL(context.Background(), db, url)
+		if err != nil || embed == nil {
+			fmt.Println("Failed to get embed from URL:", err)
+			continue
+		}
+		embed.ID = snowflake.New()
+
+		storage.AddEmbed(db, id, embed)
+
+	}
+	message, err := storage.GetMessage(db, id)
+	if err != nil {
+		c.HandleError(err)
+		return
+	}
+	gw.Relay(Event{
+		Type: EventTypeMessageUpdate,
+		Data: MessageUpdateEvent{
+			Message: message,
+		},
+	})
 }

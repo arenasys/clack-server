@@ -17,6 +17,7 @@ type Previews struct {
 
 func GetOriginal(content io.Reader, useTemp bool) ([]byte, error) {
 	commonArgs := []string{
+		"-threads", "1",
 		"-i", "-",
 		"-vframes", "1",
 		"-quality", "100",
@@ -30,12 +31,13 @@ func GetOriginal(content io.Reader, useTemp bool) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create temp file: %v", err)
 		}
+		tmpPath := tmp.Name()
 		_, err = io.Copy(tmp, content)
 		if err != nil {
 			return nil, fmt.Errorf("copy to temp file: %v", err)
 		}
-		commonArgs[1] = tmp.Name()
-		return runFFmpeg(commonArgs)
+		commonArgs[1] = tmpPath
+		return runFFmpegOnTmpFile(commonArgs, tmpPath)
 
 	} else {
 		return runFFmpegOnReader(commonArgs, content)

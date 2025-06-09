@@ -8,7 +8,7 @@ import (
 const (
 	EventTypeErrorResponse = iota
 
-	EventTypeSiteResponse     = iota
+	EventTypeSettingsResponse = iota
 	EventTypeOverviewResponse = iota
 
 	EventTypeMessagesRequest  = iota
@@ -71,18 +71,20 @@ type Event struct {
 
 type ErrorResponse struct {
 	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Request int    `json:"request"`
+	Message string `json:"message,omitempty"`
 }
 
-type SiteResponse struct {
-	SiteName         string `json:"siteName"`
-	LoginMessage     string `json:"loginMessage"`
-	Authenticated    bool   `json:"authenticated"`
-	UsesEmail        bool   `json:"usesEmail"`
-	UsesInviteCodes  bool   `json:"usesInviteCodes"`
-	UsesCaptcha      bool   `json:"usesCaptcha"`
-	UsesLoginCaptcha bool   `json:"usesLoginCaptcha"`
-	CaptchSiteKey    string `json:"captchaSiteKey,omitempty"`
+type SettingsResponse struct {
+	SiteName           string `json:"siteName"`
+	LoginMessage       string `json:"loginMessage"`
+	DefaultPermissions int    `json:"defaultPermissions"`
+	Authenticated      bool   `json:"authenticated"`
+	UsesEmail          bool   `json:"usesEmail"`
+	UsesInviteCodes    bool   `json:"usesInviteCodes"`
+	UsesCaptcha        bool   `json:"usesCaptcha"`
+	UsesLoginCaptcha   bool   `json:"usesLoginCaptcha"`
+	CaptchSiteKey      string `json:"captchaSiteKey,omitempty"`
 }
 
 type OverviewResponse struct {
@@ -153,6 +155,14 @@ type MessageUploadSlotResponse struct {
 	SlotID Snowflake `json:"slot,omitempty"`
 }
 
+type MessageDeleteRequest struct {
+	MessageID Snowflake `json:"message"`
+}
+
+type MessageUpdateRequest struct {
+	MessageID Snowflake `json:"message"`
+	Content   string    `json:"content"`
+}
 type MessageAddEvent struct {
 	Message Message `json:"message"`
 	Author  User    `json:"author"`
@@ -160,6 +170,10 @@ type MessageAddEvent struct {
 
 type MessageUpdateEvent struct {
 	Message Message `json:"message"`
+}
+
+type MessageDeleteEvent struct {
+	MessageID Snowflake `json:"message"`
 }
 
 type LoginRequest struct {

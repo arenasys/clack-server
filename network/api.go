@@ -3,9 +3,11 @@ package network
 import (
 	"clack/chat"
 	"clack/common/snowflake"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -41,6 +43,8 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = NewLimiterReader(r.Body, 1024*1024, 100*time.Millisecond)
+
 	reader, err := r.MultipartReader()
 	if err != nil {
 		http.Error(w, "failed to create multipart reader", http.StatusBadRequest)
@@ -48,7 +52,9 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	err = chat.HandleGatewayUpload(srvCtx, snowflake.Snowflake(slotID), reader)
 	if err != nil {
+		r.Body.Close()
 		http.Error(w, "failed to handle upload", http.StatusInternalServerError)
+		fmt.Println(err)
 		return
 	} else {
 		w.WriteHeader(http.StatusOK)

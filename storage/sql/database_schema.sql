@@ -15,8 +15,7 @@ CREATE TABLE roles (
     name TEXT NOT NULL,
     color INTEGER NOT NULL,
     position INTEGER NOT NULL,
-    allow INTEGER DEFAULT 0,
-    deny INTEGER DEFAULT 0,
+    permissions INTEGER DEFAULT 0,
     hoisted INTEGER DEFAULT 0,
     mentionable INTEGER DEFAULT 0
 );
@@ -188,18 +187,18 @@ CREATE TABLE attachments (
 
 CREATE TABLE settings (
     id INTEGER PRIMARY KEY,
-    site_name TEXT NOT NULL,
-    login_message TEXT NOT NULL,
+    site_name TEXT NOT NULL DEFAULT '',
+    login_message TEXT NOT NULL DEFAULT '',
+    default_permissions INTEGER DEFAULT 0,
     uses_email INTEGER DEFAULT 0,
     uses_invite_code INTEGER DEFAULT 0,
     uses_captcha INTEGER DEFAULT 0,
     uses_login_captcha INTEGER DEFAULT 0,
-    captcha_site_key TEXT NOT NULL,
-    captcha_secret_key TEXT NOT NULL
+    captcha_site_key TEXT NOT NULL DEFAULT '',
+    captcha_secret_key TEXT NOT NULL DEFAULT ''
 );
 
-INSERT OR IGNORE INTO settings(id, site_name, login_message, uses_email, uses_invite_code, uses_captcha, uses_login_captcha, captcha_site_key, captcha_secret_key)
-VALUES (0, 'Clack', 'Welcome back!', 0, 0, 0, 0, '', '');
+INSERT OR IGNORE INTO settings(id) VALUES (0);
 
 CREATE TABLE previews (
     id INTEGER PRIMARY KEY,

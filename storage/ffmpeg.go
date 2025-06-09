@@ -7,8 +7,18 @@ import (
 	"os/exec"
 )
 
-func runFFmpeg(args []string) ([]byte, error) {
-	cmd := exec.Command("ffmpeg", args...)
+func runFFmpegOnTmpFile(args []string, tmpPath string) ([]byte, error) {
+
+	var cmd *exec.Cmd
+	var err error
+	if true {
+		cmd, err = sandboxFFmpegCommand(tmpPath, args...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create sandbox command: %v", err)
+		}
+	} else {
+		cmd = exec.Command("ffmpeg", args...)
+	}
 
 	var outputBuffer bytes.Buffer
 	cmd.Stdout = &outputBuffer
@@ -24,7 +34,17 @@ func runFFmpeg(args []string) ([]byte, error) {
 }
 
 func runFFmpegOnReader(args []string, reader io.Reader) ([]byte, error) {
-	cmd := exec.Command("ffmpeg", args...)
+
+	var cmd *exec.Cmd
+	var err error
+	if true {
+		cmd, err = sandboxFFmpegCommand("", args...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create sandbox command: %v", err)
+		}
+	} else {
+		cmd = exec.Command("ffmpeg", args...)
+	}
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {

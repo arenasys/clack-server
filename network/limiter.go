@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -147,4 +148,35 @@ func (lw *LimiterResponseWriter) Push(target string, opts *http.PushOptions) err
 		return pusher.Push(target, opts)
 	}
 	return http.ErrNotSupported
+}
+
+type LimiterReader struct {
+	reader  io.ReadCloser
+	limiter *rate.Limiter
+}
+
+func NewLimiterReader(reader io.ReadCloser, limit int, latency time.Duration) LimiterReader {
+	time.Sleep(latency)
+
+	return LimiterReader{
+		reader:  reader,
+		limiter: rate.NewLimiter(rate.Limit(limit), limit),
+	}
+}
+
+func (r LimiterReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		if err := r.limiter.WaitN(context.Background(), n); err != nil {
+			return n, err
+		}
+	}
+	return n, err
+}
+
+func (r LimiterReader) Close() error {
+	if closer, ok := r.reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
 }

@@ -10,7 +10,7 @@ var (
 	userMentionRegex    = regexp.MustCompile(`<@([0-9]+)>`)
 	roleMentionRegex    = regexp.MustCompile(`<@&([0-9]+)>`)
 	channelMentionRegex = regexp.MustCompile(`<#([0-9]+)>`)
-	urlRegex            = regexp.MustCompile(`(https?://[^\s]+)`)
+	urlRegex            = regexp.MustCompile(`(https?:\/\/[^\s<]+[^<.,:;"')\]\s])`)
 )
 
 func ParseMessageContent(content string) (mentionedUsers []Snowflake, mentionedRoles []Snowflake, mentionedChannels []Snowflake, urls []string) {

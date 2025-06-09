@@ -186,7 +186,7 @@ func ParseOEmbed(ctx context.Context, embed *Embed, content string) error {
 		return fmt.Errorf("failed to unmarshal oembed: %w", err)
 	}
 
-	if oembed.Type == "rich" && oembed.Title != "" {
+	if oembed.Type == "rich" && embed.Title == "" {
 		embed.Title = oembed.Title
 	}
 
@@ -392,6 +392,8 @@ func GetRichEmbed(ctx context.Context, info *ContentInfo) (*Embed, error) {
 		if err != nil {
 			continue
 		}
+
+		fmt.Println("OEmbed content:", oembedContent)
 
 		ParseOEmbed(ctx, embed, oembedContent)
 	}

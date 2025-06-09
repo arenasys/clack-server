@@ -6,6 +6,8 @@ import (
 
 type Snowflake = snowflake.Snowflake
 
+const SnowflakeNone Snowflake = 0
+
 const (
 	UserStatusOffline = iota
 	UserStatusOnline  = iota
@@ -41,7 +43,7 @@ const (
 	PermissionSendMessages    = 1 << iota
 	PermissionAddReactions    = 1 << iota
 	PermissionEmbedLinks      = 1 << iota
-	PermissionAttachFiles     = 1 << iota
+	PermissionUploadFiles     = 1 << iota
 	PermissionMentionEveryone = 1 << iota
 	PermissionChangeNickname  = 1 << iota
 
@@ -54,6 +56,16 @@ const (
 	PermissionManageRoles     = 1 << iota
 	PermissionManageEmojis    = 1 << iota
 )
+
+const PermissionDefault = PermissionSendMessages |
+	PermissionAddReactions |
+	PermissionEmbedLinks |
+	PermissionUploadFiles |
+	PermissionChangeNickname |
+	PermissionViewChannel |
+	PermissionReadMessageHistory
+
+const PermissionAll = 0x7FFFFFFF
 
 const (
 	OverwriteTypeRole = iota
@@ -88,8 +100,7 @@ type Role struct {
 	Name        string    `json:"name" validate:"required"`
 	Color       int       `json:"color" validate:"required"`
 	Position    int       `json:"position" validate:"required"`
-	Allow       int       `json:"allow" validate:"required"`
-	Deny        int       `json:"deny" validate:"required"`
+	Permissions int       `json:"permissions" validate:"required"`
 	Hoisted     bool      `json:"hoisted" validate:"required"`
 	Mentionable bool      `json:"mentionable" validate:"required"`
 }
@@ -112,14 +123,14 @@ type Message struct {
 	AuthorID          Snowflake    `json:"author" validate:"required"`
 	ReferenceID       Snowflake    `json:"reference,omitempty"`
 	Content           string       `json:"content" validate:"required"`
-	EditedTimestamp   int          `json:"edited_timestamp,omitempty"`
+	EditedTimestamp   int          `json:"editedTimestamp,omitempty"`
 	Attachments       []Attachment `json:"attachments,omitempty"`
 	Embeds            []Embed      `json:"embeds,omitempty"`
 	Reactions         []Reaction   `json:"reactions,omitempty"`
-	MentionedUsers    []Snowflake  `json:"mentioned_users,omitempty"`
-	MentionedRoles    []Snowflake  `json:"mentioned_roles,omitempty"`
-	MentionedChannels []Snowflake  `json:"mentioned_channels,omitempty"`
-	EmbeddableURLs    []string     `json:"embeddable_urls,omitempty"`
+	MentionedUsers    []Snowflake  `json:"mentionedUsers,omitempty"`
+	MentionedRoles    []Snowflake  `json:"mentionedRoles,omitempty"`
+	MentionedChannels []Snowflake  `json:"mentionedChannels,omitempty"`
+	EmbeddableURLs    []string     `json:"embeddableURLs,omitempty"`
 }
 
 const (
@@ -198,14 +209,15 @@ type Attachment struct {
 }
 
 type Settings struct {
-	SiteName         string `json:"siteName"`
-	LoginMessage     string `json:"loginMessage"`
-	UsesEmail        bool   `json:"usesEmail"`
-	UsesInviteCodes  bool   `json:"usesInviteCodes"`
-	UsesCaptcha      bool   `json:"usesCaptcha"`
-	UsesLoginCaptcha bool   `json:"usesLoginCaptcha"`
-	CaptchaSiteKey   string `json:"captchaSiteKey"`
-	CaptchaSecretKey string `json:"-"`
+	SiteName           string `json:"siteName"`
+	LoginMessage       string `json:"loginMessage"`
+	DefaultPermissions int    `json:"defaultPermissions"`
+	UsesEmail          bool   `json:"usesEmail"`
+	UsesInviteCodes    bool   `json:"usesInviteCodes"`
+	UsesCaptcha        bool   `json:"usesCaptcha"`
+	UsesLoginCaptcha   bool   `json:"usesLoginCaptcha"`
+	CaptchaSiteKey     string `json:"captchaSiteKey"`
+	CaptchaSecretKey   string `json:"-"`
 }
 
 const (
@@ -217,22 +229,6 @@ const (
 	ErrorCodeTakenUsername      = iota
 	ErrorCodeInvalidInviteCode  = iota
 	ErrorCodeInvalidCaptcha     = iota
+	ErrorCodeNoPermission       = iota
 	ErrorCodeConnectionClosing  = iota
 )
-
-func ErrorMessage(err int) string {
-	switch err {
-	case ErrorCodeInternalError:
-		return "internal server error"
-	case ErrorCodeInvalidRequest:
-		return "invalid request"
-	case ErrorCodeInvalidCredentials:
-		return "invalid credentials"
-	case ErrorCodeInvalidToken:
-		return "invalid token"
-	case ErrorCodeConnectionClosing:
-		return "connection closing"
-	default:
-		return "error"
-	}
-}

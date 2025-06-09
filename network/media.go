@@ -6,8 +6,8 @@ import (
 	"clack/storage"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -117,17 +117,17 @@ func externalHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetURL, err := url.QueryUnescape(targetURLEncoded)
+	targetURL := targetURLEncoded /*, err := url.QueryUnescape(targetURLEncoded)
 	if err != nil {
 		srvLog.Printf("Failed to unescape URL: %v", err)
 		http.Error(w, "invalid url", http.StatusBadRequest)
 		return
-	}
+	}*/
 
 	db, err := storage.OpenDatabase(context.Background())
 	defer storage.CloseDatabase(db)
 
-	allowed, err := storage.CheckURLIsAllowed(db, snowflake.Snowflake(targetEmbedID), targetURL)
+	allowed, err := storage.IsURLAllowed(db, snowflake.Snowflake(targetEmbedID), targetURL)
 	if err != nil {
 		srvLog.Printf("Failed to check URL: %v", err)
 		http.Error(w, "failed to check URL", http.StatusInternalServerError)
@@ -135,7 +135,9 @@ func externalHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !allowed {
+		fmt.Println("URL not allowed:", targetURLEncoded, targetURL)
 		http.Error(w, "url not allowed", http.StatusForbidden)
+		return
 	}
 
 	/*db, err := storage.OpenDatabase(context.Background())

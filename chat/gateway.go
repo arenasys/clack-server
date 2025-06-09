@@ -85,7 +85,8 @@ type GatewayConnection struct {
 	token   string
 	session string
 
-	seq string
+	seq     string
+	request int
 
 	closing bool
 
@@ -233,7 +234,7 @@ func (c *GatewayConnection) Introduction(token string) {
 	defer storage.CloseDatabase(db)
 
 	c.TryAuthenticate(token, db)
-	c.HandleSiteRequest(db)
+	c.HandleSettingsRequest(db)
 
 	if c.Authenticated() {
 		c.HandleOverviewRequest(db)
@@ -267,6 +268,7 @@ func (c *GatewayConnection) Run(token string) {
 		}
 
 		c.seq = msg.Seq
+		c.request = msg.Type
 
 		db, _ := storage.OpenDatabase(c.ctx)
 
@@ -295,6 +297,12 @@ func (c *GatewayConnection) Run(token string) {
 			case EventTypeMessageSendRequest:
 				c.HandleMessageSendRequest(msg, db)
 				break
+			case EventTypeMessageUpdate:
+				c.HandleMessageUpdateRequest(msg, db)
+				break
+			case EventTypeMessageDelete:
+				c.HandleMessageDeleteRequest(msg, db)
+				break
 			default:
 				c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
 			}
@@ -320,8 +328,6 @@ func HandleGatewayConnection(ctx context.Context, conn *websocket.Conn, token st
 	gwLog.Printf("Connection from %s closed", conn.RemoteAddr().String())
 }
 func HandleGatewayUpload(ctx context.Context, slotID Snowflake, mr *multipart.Reader) error {
-	gwLog.Printf("Upload from %s", ctx.Value("remote_addr"))
-
 	pending := gw.PopPendingRequest(slotID)
 	if pending == nil {
 		return fmt.Errorf("invalid slot id")
@@ -373,16 +379,16 @@ func HandleGatewayUpload(ctx context.Context, slotID Snowflake, mr *multipart.Re
 
 		if strings.HasPrefix(name, "file_") {
 			attachmentID := snowflake.New()
-			storedName := storage.GetAttachmentFilename(attachmentID, metadata.Filename)
 
 			reader := NewPartReader(part, metadata.Size)
 
-			if err := storage.AddFile(db, storedName, reader); err != nil {
+			path := storage.GetAttachmentPath(attachmentID, metadata.Filename)
+			if err := storage.AddFile(db, path, reader); err != nil {
 				part.Close()
 				return fmt.Errorf("storing file %q: %v", metadata.Filename, err)
 			}
 
-			att, err := storage.BuildAttachmentFromFile(db, attachmentID, storedName)
+			att, err := storage.BuildAttachmentFromFile(db, attachmentID, metadata.Filename)
 			if err != nil {
 				part.Close()
 				return fmt.Errorf("building attachment %q: %v", metadata.Filename, err)

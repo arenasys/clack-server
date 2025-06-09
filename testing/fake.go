@@ -45,13 +45,17 @@ func PopulateDatabase(ctx context.Context) {
 	}
 	defer storage.CloseDatabase(db)
 
-	settings, _ := storage.GetSettings(db)
-
-	settings.UsesCaptcha = true
-	settings.UsesLoginCaptcha = true
-	settings.UsesEmail = true
-	settings.CaptchaSiteKey = "052869f2-0556-4700-9b48-8bf6807003b6"
-	settings.CaptchaSecretKey = "ES_040e28547c354609b8d8c0e7a630f6d3"
+	var settings Settings = Settings{
+		SiteName:           "Clack",
+		LoginMessage:       "Welcome back!",
+		DefaultPermissions: PermissionDefault,
+		UsesEmail:          false,
+		UsesInviteCodes:    false,
+		UsesCaptcha:        true,
+		UsesLoginCaptcha:   false,
+		CaptchaSiteKey:     "052869f2-0556-4700-9b48-8bf6807003b6",
+		CaptchaSecretKey:   "ES_040e28547c354609b8d8c0e7a630f6d3",
+	}
 
 	storage.SetSettings(db, settings)
 
@@ -62,7 +66,7 @@ func PopulateDatabase(ctx context.Context) {
 		snowflake.New(),
 		snowflake.New(),
 	}
-	role := db.Prep("INSERT INTO roles (id, name, color, position, allow, deny, hoisted, mentionable) VALUES ($id, $name, $color, $position, $allow, $deny, $hoisted, $mentionable);")
+	role := db.Prep("INSERT INTO roles (id, name, color, position, permissions, hoisted, mentionable) VALUES ($id, $name, $color, $position, $permissions, $hoisted, $mentionable);")
 
 	role.SetInt64("$id", int64(roles[0]))
 	role.SetText("$name", "Admin")
@@ -70,7 +74,7 @@ func PopulateDatabase(ctx context.Context) {
 	role.SetInt64("$position", 0)
 	role.SetBool("$hoisted", true)
 	role.SetBool("$mentionable", true)
-	role.SetInt64("$allow", PermissionAdministrator)
+	role.SetInt64("$permissions", PermissionAdministrator)
 	executeStatement(role)
 
 	role.SetInt64("$id", int64(roles[1]))
@@ -79,7 +83,7 @@ func PopulateDatabase(ctx context.Context) {
 	role.SetInt64("$position", 1)
 	role.SetBool("$hoisted", true)
 	role.SetBool("$mentionable", true)
-	role.SetInt64("$allow", PermissionManageChannels|PermissionManageRoles|PermissionManageMessages)
+	role.SetInt64("$permissions", PermissionManageChannels|PermissionManageRoles|PermissionManageMessages)
 	executeStatement(role)
 
 	role.SetInt64("$id", int64(roles[2]))
@@ -136,7 +140,7 @@ func PopulateDatabase(ctx context.Context) {
 	var noError error = nil
 	commit(&noError)
 
-	createMainUser(db, roles[0])
+	createMainUser(db, roles[2])
 
 	channel := db.Prep("INSERT INTO channels (id, type, name, description, position, parent_id) VALUES ($id, $type, $name, $description, $position, $parent_id);")
 

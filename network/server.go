@@ -23,9 +23,6 @@ func buildRouter() *mux.Router {
 	buildAPIRouter(r)
 	buildMediaRouter(r)
 
-	//api := r.NewRoute().Subrouter()
-	//api.Use(LimiterMiddleware(500*time.Millisecond, 250*1024))
-
 	r.PathPrefix("/").Handler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		proxy := httputil.NewSingleHostReverseProxy(&url.URL{
 			Scheme: "http",
