@@ -438,7 +438,7 @@ func TryServeUncached(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	return nil
 }
 
-func GetCacheRequest(url string) cacheRequest {
+func GetCacheRequest(messageID, embedID Snowflake, url string) cacheRequest {
 	hash := GetCacheHash(url)
 	lock := GetCacheLock(hash)
 	filePath := filepath.Join(DataFolder, "external", hash)
@@ -452,8 +452,8 @@ func GetCacheRequest(url string) cacheRequest {
 	}
 }
 
-func ServeExternal(w http.ResponseWriter, r *http.Request, url string) error {
-	info := GetCacheRequest(url)
+func ServeExternal(w http.ResponseWriter, r *http.Request, messageID, embedID Snowflake, url string) error {
+	info := GetCacheRequest(messageID, embedID, url)
 
 	err := TryServeCached(w, r, info)
 	if err != nil {
@@ -505,8 +505,8 @@ func (c *CacheWriter) Close() error {
 	return err
 }
 
-func GetCacheWriter(url string, contentType string, start int64, total int64) (*CacheWriter, error) {
-	info := GetCacheRequest(url)
+func GetCacheWriter(messageID, embedID Snowflake, url string, contentType string, start int64, total int64) (*CacheWriter, error) {
+	info := GetCacheRequest(messageID, embedID, url)
 
 	os.MkdirAll(filepath.Dir(info.cacheFilePath), 0755)
 

@@ -185,7 +185,11 @@ func (c *GatewayConnection) ClientIP() string {
 }
 
 func (c *GatewayConnection) TryAuthenticate(token string, db *sqlite.Conn) bool {
-	userID, err := storage.Authenticate(db, token)
+	tx := storage.NewTransaction(db)
+	tx.Start()
+	userID, err := tx.Authenticate(token)
+	tx.Commit(err)
+
 	if err != nil {
 		fmt.Println("Failed to authenticate", err)
 		c.HandleError(err)
@@ -230,8 +234,8 @@ func (c *GatewayConnection) Authenticated() bool {
 }
 
 func (c *GatewayConnection) Introduction(token string) {
-	db, _ := storage.OpenDatabase(c.ctx)
-	defer storage.CloseDatabase(db)
+	db, _ := storage.OpenConnection(c.ctx)
+	defer storage.CloseConnection(db)
 
 	c.TryAuthenticate(token, db)
 	c.HandleSettingsRequest(db)
@@ -239,6 +243,57 @@ func (c *GatewayConnection) Introduction(token string) {
 	if c.Authenticated() {
 		c.HandleOverviewRequest(db)
 	}
+}
+
+func (c *GatewayConnection) Process() {
+	msg, err := c.Read()
+	if err != nil {
+		c.closing = true
+		return
+	}
+
+	c.seq = msg.Seq
+	c.request = msg.Type
+
+	db, _ := storage.OpenConnection(c.ctx)
+
+	if !c.Authenticated() {
+		switch msg.Type {
+		case EventTypeLoginRequest:
+			c.HandleLoginRequest(msg, db)
+			break
+		case EventTypeRegisterRequest:
+			c.HandleRegisterRequest(msg, db)
+			break
+		default:
+			c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		}
+	} else {
+		switch msg.Type {
+		case EventTypeMessagesRequest:
+			c.HandleMessagesRequest(msg, db)
+			break
+		case EventTypeUsersRequest:
+			c.HandleUsersRequest(msg, db)
+			break
+		case EventTypeUserListRequest:
+			c.HandleUserListRequest(msg, db)
+			break
+		case EventTypeMessageSendRequest:
+			c.HandleMessageSendRequest(msg, db)
+			break
+		case EventTypeMessageUpdate:
+			c.HandleMessageUpdateRequest(msg, db)
+			break
+		case EventTypeMessageDelete:
+			c.HandleMessageDeleteRequest(msg, db)
+			break
+		default:
+			c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		}
+	}
+
+	storage.CloseConnection(db)
 }
 
 func (c *GatewayConnection) Run(token string) {
@@ -261,54 +316,7 @@ func (c *GatewayConnection) Run(token string) {
 	c.Introduction(token)
 
 	for c.ctx.Err() == nil && !c.closing {
-		msg, err := c.Read()
-		if err != nil {
-			c.closing = true
-			break
-		}
-
-		c.seq = msg.Seq
-		c.request = msg.Type
-
-		db, _ := storage.OpenDatabase(c.ctx)
-
-		if !c.Authenticated() {
-			switch msg.Type {
-			case EventTypeLoginRequest:
-				c.HandleLoginRequest(msg, db)
-				break
-			case EventTypeRegisterRequest:
-				c.HandleRegisterRequest(msg, db)
-				break
-			default:
-				c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
-			}
-		} else {
-			switch msg.Type {
-			case EventTypeMessagesRequest:
-				c.HandleMessagesRequest(msg, db)
-				break
-			case EventTypeUsersRequest:
-				c.HandleUsersRequest(msg, db)
-				break
-			case EventTypeUserListRequest:
-				c.HandleUserListRequest(msg, db)
-				break
-			case EventTypeMessageSendRequest:
-				c.HandleMessageSendRequest(msg, db)
-				break
-			case EventTypeMessageUpdate:
-				c.HandleMessageUpdateRequest(msg, db)
-				break
-			case EventTypeMessageDelete:
-				c.HandleMessageDeleteRequest(msg, db)
-				break
-			default:
-				c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
-			}
-		}
-
-		storage.CloseDatabase(db)
+		c.Process()
 	}
 }
 
@@ -338,16 +346,17 @@ func HandleGatewayUpload(ctx context.Context, slotID Snowflake, mr *multipart.Re
 		return fmt.Errorf("invalid session")
 	}
 
-	db, _ := storage.OpenDatabase(ctx)
-	defer storage.CloseDatabase(db)
+	db, _ := storage.OpenConnection(ctx)
+	defer storage.CloseConnection(db)
 
 	// Acknowledge the initial send response
-	pending.message.ID = snowflake.New()
+	messageID := snowflake.New()
+	pending.message.ID = messageID
 	conn.Write(Event{
 		Type: EventTypeMessageSendResponse,
 		Seq:  pending.seq,
 		Data: MessageSendResponse{
-			MessageID: pending.message.ID,
+			MessageID: messageID,
 		},
 	})
 
@@ -382,21 +391,15 @@ func HandleGatewayUpload(ctx context.Context, slotID Snowflake, mr *multipart.Re
 
 			reader := NewPartReader(part, metadata.Size)
 
-			path := storage.GetAttachmentPath(attachmentID, metadata.Filename)
-			if err := storage.AddFile(db, path, reader); err != nil {
+			attachment, err := storage.UploadAttachment(messageID, attachmentID, metadata.Filename, reader)
+			if err != nil {
 				part.Close()
 				return fmt.Errorf("storing file %q: %v", metadata.Filename, err)
 			}
 
-			att, err := storage.BuildAttachmentFromFile(db, attachmentID, metadata.Filename)
-			if err != nil {
-				part.Close()
-				return fmt.Errorf("building attachment %q: %v", metadata.Filename, err)
-			}
-
 			part.Close()
 
-			pending.message.Attachments = append(pending.message.Attachments, *att)
+			pending.message.Attachments = append(pending.message.Attachments, *attachment)
 			continue
 		}
 
@@ -404,7 +407,7 @@ func HandleGatewayUpload(ctx context.Context, slotID Snowflake, mr *multipart.Re
 	}
 
 	// Finalize the send request with all collected attachments
-	conn.HandleMessageSendRequestComplete(&pending.message, pending.seq, db)
+	conn.FinalizeMessageSendRequest(&pending.message, pending.seq, db)
 	return nil
 }
 

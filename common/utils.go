@@ -1,19 +1,28 @@
 package common
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 	"unicode"
 )
+
+type ClackContext struct {
+	context.Context
+	Cancel     context.CancelFunc
+	Subsystems sync.WaitGroup
+}
 
 type CodedError struct {
 	Code    int
@@ -68,7 +77,7 @@ type File struct {
 }
 
 type FileInputReader interface {
-	io.ReadCloser
+	io.Reader
 	Size() int64
 }
 
@@ -180,9 +189,13 @@ func NewLogger(prefix string) *log.Logger {
 	return log.New(os.Stdout, prefix, 0)
 }
 
-func HashPassword(password string, salt string) string {
-	var hash = sha256.Sum256([]byte(password + salt))
+func HashSha256(data string, salt string) string {
+	var hash = sha256.Sum256([]byte(data + salt))
 	return hex.EncodeToString(hash[:])
+}
+
+func HashCRC32(data string) uint32 {
+	return crc32.ChecksumIEEE([]byte(data))
 }
 
 func GetRandom128() string {

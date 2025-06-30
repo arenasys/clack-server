@@ -147,12 +147,7 @@ CREATE TABLE embeds (
     footer_text TEXT,
     footer_icon_url TEXT,
     footer_icon_id INTEGER,
-    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
-    FOREIGN KEY (image_id) REFERENCES previews(id) ON DELETE SET NULL,
-    FOREIGN KEY (thumbnail_id) REFERENCES previews(id) ON DELETE SET NULL,
-    FOREIGN KEY (video_id) REFERENCES previews(id) ON DELETE SET NULL,
-    FOREIGN KEY (author_icon_id) REFERENCES previews(id) ON DELETE SET NULL,
-    FOREIGN KEY (footer_icon_id) REFERENCES previews(id) ON DELETE SET NULL
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
 CREATE TABLE embed_fields (
@@ -165,14 +160,12 @@ CREATE TABLE embed_fields (
 );
 
 CREATE TABLE reactions (
-    emoji TEXT NOT NULL,
-    emoji_id INTEGER,
+    emoji_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
-    FOREIGN KEY (message_id) REFERENCES messages(id),
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    FOREIGN KEY (emoji_id) REFERENCES emojis(id),
-    UNIQUE (emoji, message_id, user_id)
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE (emoji_id, message_id, user_id)
 );
 
 CREATE TABLE attachments (
@@ -181,7 +174,7 @@ CREATE TABLE attachments (
     type INTEGER NOT NULL,
     mimetype TEXT NOT NULL,
     filename TEXT NOT NULL,
-    path TEXT NOT NULL,
+    size INTEGER NOT NULL,
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
@@ -201,26 +194,17 @@ CREATE TABLE settings (
 INSERT OR IGNORE INTO settings(id) VALUES (0);
 
 CREATE TABLE previews (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY, -- Attachment ID or Embed Image/Thumbnail/Video/Etc ID
     width INTEGER NOT NULL,
     height INTEGER NOT NULL,
-    display TEXT NOT NULL,  -- File paths
-    preview TEXT NOT NULL,
-    blur TEXT NOT NULL
+    preload TEXT NOT NULL -- Base64 encoded WebP preload image
 );
 
-CREATE TABLE sqlar(
-  name TEXT PRIMARY KEY,  -- name of the file
-  mode INT,               -- access permissions
-  mtime INT,              -- last modification time
-  sz INT,                 -- original file size
-  data BLOB               -- compressed content
-);
-
--- Message Lookup Indexes
+-- Indexes
 CREATE INDEX idx_messages_channel_id ON messages(channel_id);
 CREATE INDEX idx_embeds_message_id ON embeds(message_id);
-CREATE INDEX idx_reactions_message_id ON reactions(message_id);
+CREATE INDEX idx_reactions_message_id ON reactions(message_id, emoji_id);
+CREATE INDEX idx_reactions_user_id ON reactions(message_id, emoji_id, user_id);
 CREATE INDEX idx_attachments_message_id ON attachments(message_id);
 CREATE INDEX idx_embed_fields_embed_id ON embed_fields(embed_id);
 
@@ -233,3 +217,11 @@ FROM
     embeds
 WHERE
     video_url IS NOT NULL;
+
+-- Triggers
+CREATE TRIGGER delete_reactions_on_emoji_delete
+AFTER DELETE ON emojis
+FOR EACH ROW
+BEGIN
+    DELETE FROM reactions WHERE emoji_id = OLD.id;
+END;

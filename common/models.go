@@ -187,8 +187,9 @@ type EmbedField struct {
 }
 
 type Reaction struct {
-	Emoji Emoji       `json:"emoji" validate:"required"`
-	Users []Snowflake `json:"users" validate:"required"`
+	EmojiID Snowflake   `json:"emoji" validate:"required"`
+	Count   int         `json:"count" validate:"required"`
+	Users   []Snowflake `json:"users",omitempty`
 }
 
 const (

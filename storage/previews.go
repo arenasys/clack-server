@@ -11,8 +11,8 @@ type Previews struct {
 	Width   int
 	Height  int
 	Display []byte
-	Preview []byte
-	Blur    []byte
+	Thumb   []byte
+	Preload []byte
 }
 
 func GetOriginal(content io.Reader, useTemp bool) ([]byte, error) {
@@ -44,7 +44,7 @@ func GetOriginal(content io.Reader, useTemp bool) ([]byte, error) {
 	}
 }
 
-func GetPreviews(content io.Reader, useTemp bool) (*Previews, error) {
+func CreatePreviews(content io.Reader, useTemp bool) (*Previews, error) {
 	original, err := GetOriginal(content, useTemp)
 	if err != nil {
 		return nil, fmt.Errorf("GetOriginal: %v", err)
@@ -87,22 +87,22 @@ func GetPreviews(content io.Reader, useTemp bool) (*Previews, error) {
 		return nil, fmt.Errorf("get display: %v", err)
 	}
 
-	previewArgs := append(commonArgs,
+	thumbArgs := append(commonArgs,
 		"-vf", "scale=w='min(iw,350)':h='min(ih,350)':force_original_aspect_ratio=increase", "-",
 	)
 
-	p.Preview, err = runFFmpegOnReader(previewArgs, bytes.NewReader(p.Display))
+	p.Thumb, err = runFFmpegOnReader(thumbArgs, bytes.NewReader(p.Display))
 	if err != nil {
-		return nil, fmt.Errorf("get preview: %v", err)
+		return nil, fmt.Errorf("get thumb: %v", err)
 	}
 
-	blurArgs := append(commonArgs,
+	preloadArgs := append(commonArgs,
 		"-vf", "huesaturation=intensity=1,boxblur=32,scale=w='min(iw,32)':h='min(ih,32)':force_original_aspect_ratio=decrease", "-",
 	)
 
-	p.Blur, err = runFFmpegOnReader(blurArgs, bytes.NewReader(p.Preview))
+	p.Preload, err = runFFmpegOnReader(preloadArgs, bytes.NewReader(p.Thumb))
 	if err != nil {
-		return nil, fmt.Errorf("get blur: %v", err)
+		return nil, fmt.Errorf("get preload: %v", err)
 	}
 
 	return &p, nil

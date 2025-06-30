@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"golang.org/x/net/html"
-	"zombiezen.com/go/sqlite"
 )
 
 const (
@@ -419,56 +418,70 @@ func GetVideoEmbed(ctx context.Context, info *ContentInfo) (*Embed, error) {
 	}, nil
 }
 
-func GetImagePreviews(ctx context.Context, conn *sqlite.Conn, url string, id Snowflake) (width int, height int, err error) {
-	content, err := GetContent(ctx, url)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get content: %w", err)
-	}
-
-	previews, err := storage.GetPreviews(content, false)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get previews: %w", err)
-	}
-
-	err = storage.AddPreviews(conn, id, previews)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to add previews: %w", err)
-	}
-
-	return previews.Width, previews.Height, nil
+type previewResult struct {
+	Width   int
+	Height  int
+	Preload string
 }
 
-func GetVideoPreviews(ctx context.Context, conn *sqlite.Conn, url string, contentType string, length int64, id Snowflake) (width int, height int, err error) {
+func GetImagePreviews(ctx context.Context, messageID, id Snowflake, url string) (result *previewResult, err error) {
 	content, err := GetContent(ctx, url)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get content: %w", err)
+		return nil, fmt.Errorf("failed to get content: %w", err)
 	}
 
-	cache, err := cache.GetCacheWriter(url, contentType, 0, length)
+	previews, err := storage.CreatePreviews(content, false)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get cache writer: %w", err)
+		return nil, fmt.Errorf("failed to create previews: %w", err)
+	}
+
+	preload, err := storage.WritePreviews(messageID, id, previews)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write previews: %w", err)
+	}
+
+	return &previewResult{
+		Width:   previews.Width,
+		Height:  previews.Height,
+		Preload: preload,
+	}, nil
+}
+
+func GetVideoPreviews(ctx context.Context, messageID, embedID Snowflake, url string, contentType string, length int64) (result *previewResult, err error) {
+	content, err := GetContent(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get content: %w", err)
+	}
+
+	cache, err := cache.GetCacheWriter(messageID, embedID, url, contentType, 0, length)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get cache writer: %w", err)
 	}
 
 	reader := io.TeeReader(content, cache)
 
-	previews, err := storage.GetPreviews(reader, false)
+	previews, err := storage.CreatePreviews(reader, false)
 
 	cache.Close()
 	content.Close()
 
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get previews: %w", err)
+		return nil, fmt.Errorf("failed to create previews: %w", err)
 	}
 
-	err = storage.AddPreviews(conn, id, previews)
+	preload, err := storage.WritePreviews(messageID, embedID, previews)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to add previews: %w", err)
+		return nil, fmt.Errorf("failed to write previews: %w", err)
 	}
 
-	return previews.Width, previews.Height, nil
+	return &previewResult{
+		Width:   previews.Width,
+		Height:  previews.Height,
+		Preload: preload,
+	}, nil
 }
 
-func GetEmbedFromURL(ctx context.Context, conn *sqlite.Conn, targetURL string) (embed *Embed, err error) {
+func GetEmbedFromURL(ctx context.Context, messageID Snowflake, targetURL string) (embed *Embed, err error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -508,11 +521,12 @@ func GetEmbedFromURL(ctx context.Context, conn *sqlite.Conn, targetURL string) (
 
 		embed.Video.ID = snowflake.New()
 
-		width, height, err := GetVideoPreviews(ctx, conn, previewURL, info.Type, info.Length, embed.Video.ID)
+		result, err := GetVideoPreviews(ctx, messageID, embed.Video.ID, previewURL, info.Type, info.Length)
 
 		if err == nil {
-			embed.Video.Width = width
-			embed.Video.Height = height
+			embed.Video.Width = result.Width
+			embed.Video.Height = result.Height
+			embed.Video.Preload = result.Preload
 			haveVideo = true
 		}
 	}
@@ -534,11 +548,12 @@ func GetEmbedFromURL(ctx context.Context, conn *sqlite.Conn, targetURL string) (
 
 		embed.Image.ID = snowflake.New()
 
-		width, height, err := GetImagePreviews(ctx, conn, previewURL, embed.Image.ID)
+		result, err := GetImagePreviews(ctx, messageID, embed.Image.ID, previewURL)
 
 		if err == nil {
-			embed.Image.Width = width
-			embed.Image.Height = height
+			embed.Image.Width = result.Width
+			embed.Image.Height = result.Height
+			embed.Image.Preload = result.Preload
 			haveImage = true
 		}
 	}
@@ -555,11 +570,12 @@ func GetEmbedFromURL(ctx context.Context, conn *sqlite.Conn, targetURL string) (
 
 		embed.Thumbnail.ID = snowflake.New()
 
-		width, height, err := GetImagePreviews(ctx, conn, embed.Thumbnail.URL, embed.Thumbnail.ID)
+		result, err := GetImagePreviews(ctx, messageID, embed.Thumbnail.ID, embed.Thumbnail.URL)
 
 		if err == nil {
-			embed.Thumbnail.Width = width
-			embed.Thumbnail.Height = height
+			embed.Thumbnail.Width = result.Width
+			embed.Thumbnail.Height = result.Height
+			embed.Thumbnail.Preload = result.Preload
 			haveThumbnail = true
 		}
 	}

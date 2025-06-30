@@ -18,24 +18,39 @@ import (
 func attachmentHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 
-	attachmentID, err := strconv.ParseInt(vars["attachment_id"], 10, 64)
+	messageIDInt64, err := strconv.ParseInt(vars["message_id"], 10, 64)
+	if err != nil {
+		http.Error(w, "invalid message id", http.StatusBadRequest)
+		return
+	}
+	messageID := snowflake.Snowflake(messageIDInt64)
+
+	attachmentIDInt64, err := strconv.ParseInt(vars["attachment_id"], 10, 64)
 	if err != nil {
 		http.Error(w, "invalid attachment id", http.StatusBadRequest)
 		return
 	}
+	attachmentID := snowflake.Snowflake(attachmentIDInt64)
 
 	attachmentName := vars["attachment_name"]
 
-	db, err := storage.OpenDatabase(context.Background())
-	defer storage.CloseDatabase(db)
+	conn, err := storage.OpenConnection(r.Context())
+	tx := storage.NewTransaction(conn)
+	attachment, err := tx.GetAttachment(messageID, attachmentID, attachmentName)
+	storage.CloseConnection(conn)
 
 	if err != nil {
-		srvLog.Printf("Failed to open database: %v", err)
-		http.Error(w, "failed to open database", http.StatusInternalServerError)
+		if errors.Is(err, storage.ErrFileNotFound) {
+			http.Error(w, "attachment not found", http.StatusNotFound)
+			return
+		}
+		srvLog.Printf("Failed to get attachment (Message ID: %d, Attachment ID: %d, Name: %s): %v", messageIDInt64, attachmentIDInt64, attachmentName, err)
+		http.Error(w, "failed to get attachment", http.StatusInternalServerError)
 		return
 	}
 
-	attch, err := storage.GetAttachment(db, snowflake.Snowflake(attachmentID), attachmentName)
+	attch, err := storage.GetAttachment(messageID, attachment)
+
 	if err != nil {
 		if errors.Is(err, storage.ErrFileNotFound) {
 			http.Error(w, "attachment not found", http.StatusNotFound)
@@ -58,36 +73,34 @@ func attachmentHandler(w http.ResponseWriter, r *http.Request) {
 func previewHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 
-	previewID, err := strconv.ParseInt(vars["preview_id"], 10, 64)
+	messageIDInt64, err := strconv.ParseInt(vars["message_id"], 10, 64)
+	if err != nil {
+		http.Error(w, "invalid message id", http.StatusBadRequest)
+		return
+	}
+	messageID := snowflake.Snowflake(messageIDInt64)
+
+	previewIDInt64, err := strconv.ParseInt(vars["preview_id"], 10, 64)
 	if err != nil {
 		http.Error(w, "invalid preview id", http.StatusBadRequest)
 		return
 	}
+	previewID := snowflake.Snowflake(previewIDInt64)
 
 	previewType := r.URL.Query().Get("type")
-	if previewType == "" || (previewType != "preview" && previewType != "display" && previewType != "blur") {
+	if previewType != "thumbnail" && previewType != "display" {
 		http.Error(w, "invalid preview type", http.StatusBadRequest)
 		return
 	}
 
-	db, err := storage.OpenDatabase(context.Background())
-	defer storage.CloseDatabase(db)
-
-	if err != nil {
-		srvLog.Printf("Failed to open database: %v", err)
-		http.Error(w, "failed to open database", http.StatusInternalServerError)
-		return
-	}
-
-	preview, err := storage.GetPreview(db, snowflake.Snowflake(previewID), previewType)
-
+	preview, err := storage.GetPreview(messageID, previewID, previewType)
 	if err != nil {
 		if errors.Is(err, storage.ErrFileNotFound) {
 			http.Error(w, "preview not found", http.StatusNotFound)
-		} else {
-			srvLog.Printf("Failed to get preview (ID: %d): %v", previewID, err)
-			http.Error(w, "failed to get preview", http.StatusInternalServerError)
+			return
 		}
+		srvLog.Printf("Failed to get preview (Message ID: %d, Preview ID: %d, Type: %s): %v", messageID, previewID, previewType, err)
+		http.Error(w, "failed to get preview", http.StatusInternalServerError)
 		return
 	}
 
@@ -103,31 +116,41 @@ func previewHandler(w http.ResponseWriter, r *http.Request) {
 func externalHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 
-	targetEmbedID, err := strconv.ParseInt(vars["embed_id"], 10, 64)
+	messageIDInt64, err := strconv.ParseInt(vars["message_id"], 10, 64)
+	if err != nil {
+		srvLog.Printf("Invalid message id: %v", err)
+		http.Error(w, "invalid message id", http.StatusBadRequest)
+		return
+	}
+	messageID := snowflake.Snowflake(messageIDInt64)
+
+	embedIDInt64, err := strconv.ParseInt(vars["embed_id"], 10, 64)
 	if err != nil {
 		srvLog.Printf("Invalid embed id: %v", err)
 		http.Error(w, "invalid embed id", http.StatusBadRequest)
 		return
 	}
+	embedID := snowflake.Snowflake(embedIDInt64)
 
-	targetURLEncoded := r.URL.Query().Get("url")
-	if targetURLEncoded == "" {
+	urlEncoded := r.URL.Query().Get("url")
+	if urlEncoded == "" {
 		srvLog.Printf("Missing url parameter")
 		http.Error(w, "missing url parameter", http.StatusBadRequest)
 		return
 	}
 
-	targetURL := targetURLEncoded /*, err := url.QueryUnescape(targetURLEncoded)
+	url := urlEncoded /*, err := url.QueryUnescape(targetURLEncoded)
 	if err != nil {
 		srvLog.Printf("Failed to unescape URL: %v", err)
 		http.Error(w, "invalid url", http.StatusBadRequest)
 		return
 	}*/
 
-	db, err := storage.OpenDatabase(context.Background())
-	defer storage.CloseDatabase(db)
+	db, err := storage.OpenConnection(context.Background())
+	defer storage.CloseConnection(db)
 
-	allowed, err := storage.IsURLAllowed(db, snowflake.Snowflake(targetEmbedID), targetURL)
+	tx := storage.NewTransaction(db)
+	allowed, err := tx.IsURLAllowed(embedID, url)
 	if err != nil {
 		srvLog.Printf("Failed to check URL: %v", err)
 		http.Error(w, "failed to check URL", http.StatusInternalServerError)
@@ -135,7 +158,7 @@ func externalHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !allowed {
-		fmt.Println("URL not allowed:", targetURLEncoded, targetURL)
+		fmt.Println("URL not allowed:", urlEncoded, url)
 		http.Error(w, "url not allowed", http.StatusForbidden)
 		return
 	}
@@ -162,7 +185,7 @@ func externalHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	err = cache.ServeExternal(w, r, targetURL)
+	err = cache.ServeExternal(w, r, messageID, embedID, url)
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "origin") {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -173,7 +196,7 @@ func externalHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func buildMediaRouter(router *mux.Router) {
-	router.HandleFunc("/previews/{preview_id}", previewHandler)
-	router.HandleFunc("/attachments/{attachment_id}/{attachment_name}", attachmentHandler)
-	router.HandleFunc("/external/{embed_id}", externalHandler)
+	router.HandleFunc("/previews/{message_id}/{preview_id}", previewHandler)
+	router.HandleFunc("/attachments/{message_id}/{attachment_id}/{attachment_name}", attachmentHandler)
+	router.HandleFunc("/external/{message_id}/{embed_id}", externalHandler)
 }

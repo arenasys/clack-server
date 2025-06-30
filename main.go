@@ -15,16 +15,19 @@ import (
 	"clack/testing"
 )
 
-var MainCtx context.Context
-
+var mainCtx *ClackContext
 var mainLog = NewLogger("MAIN")
 
 func init() {
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGINT)
 
-	var cancel context.CancelFunc
-	MainCtx, cancel = context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+
+	mainCtx = &ClackContext{
+		Context: ctx,
+		Cancel:  cancel,
+	}
 
 	go func() {
 		<-sigchan
@@ -44,18 +47,17 @@ func main() {
 		os.Mkdir(DataFolder, 0755)
 	}
 
-	dbWait := storage.StartDatabase(MainCtx)
-	srvWait := network.StartServer(MainCtx)
+	storage.StartDatabase(mainCtx)
+	network.StartServer(mainCtx)
 
 	if !dataExists {
 		mainLog.Println("Populating database")
-		testing.PopulateDatabase(MainCtx)
+		testing.PopulateDatabase(mainCtx)
 		mainLog.Println("Done")
 	}
 
-	<-MainCtx.Done()
-	dbWait.Wait()
-	srvWait.Wait()
+	<-mainCtx.Done()
+	mainCtx.Subsystems.Wait()
 	mainLog.Println("Exiting")
 }
 

@@ -36,7 +36,11 @@ func (c *GatewayConnection) HandleError(err error) {
 }
 
 func (c *GatewayConnection) HandleSettingsRequest(db *sqlite.Conn) {
-	settings, err := storage.GetSettings(db)
+	tx := storage.NewTransaction(db)
+	tx.Start()
+	settings, err := tx.GetSettings()
+	tx.Commit(err)
+
 	if err != nil {
 		c.HandleError(err)
 		return
@@ -67,8 +71,12 @@ func (c *GatewayConnection) HandleLoginRequest(msg *UnknownEvent, db *sqlite.Con
 		return
 	}
 
-	settings, err := storage.GetSettings(db)
+	tx := storage.NewTransaction(db)
+	tx.Start()
+	settings, err := tx.GetSettings()
+
 	if err != nil {
+		tx.Commit(err)
 		c.HandleError(err)
 		return
 	}
@@ -81,11 +89,14 @@ func (c *GatewayConnection) HandleLoginRequest(msg *UnknownEvent, db *sqlite.Con
 		}
 	}
 
-	userID, token, err := storage.Login(db, req.Username, req.Password)
+	userID, token, err := tx.Login(req.Username, req.Password)
 	if err != nil {
+		tx.Commit(err)
 		c.HandleError(err)
 		return
 	}
+
+	tx.Commit(nil)
 
 	c.OnAuthentication(userID, token)
 
@@ -104,8 +115,12 @@ func (c *GatewayConnection) HandleRegisterRequest(msg *UnknownEvent, db *sqlite.
 		return
 	}
 
-	settings, err := storage.GetSettings(db)
+	tx := storage.NewTransaction(db)
+	tx.Start()
+
+	settings, err := tx.GetSettings()
 	if err != nil {
+		tx.Commit(err)
 		c.HandleError(err)
 		return
 	}
@@ -120,11 +135,14 @@ func (c *GatewayConnection) HandleRegisterRequest(msg *UnknownEvent, db *sqlite.
 
 	fmt.Println("Registering user", req.Username, req.Password, req.Email, req.InviteCode)
 
-	userID, token, err := storage.Register(db, req.Username, req.Password, req.Email, req.InviteCode)
+	userID, token, err := tx.Register(req.Username, req.Password, req.Email, req.InviteCode)
 	if err != nil {
+		tx.Commit(err)
 		c.HandleError(err)
 		return
 	}
+
+	tx.Commit(nil)
 
 	fmt.Println("Registered user", userID, token)
 
@@ -161,9 +179,13 @@ func (c *GatewayConnection) HandleOverviewRequest(db *sqlite.Conn) {
 
 	roles := index.GetAllRoles()
 
-	channels := storage.GetAllChannels(db)
+	tx := storage.NewTransaction(db)
+	tx.Start()
 
-	you, _ := storage.GetUser(db, c.userID)
+	channels := tx.GetAllChannels()
+	you, _ := tx.GetUser(c.userID)
+
+	tx.Commit(nil)
 
 	overview := Event{
 		Type: EventTypeOverviewResponse,
@@ -185,28 +207,75 @@ func (c *GatewayConnection) HandleMessagesRequest(msg *UnknownEvent, db *sqlite.
 		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
 		return
 	}
+	var err error = nil
+	var msgs []Message = nil
 
-	anchor := req.Before
-	before := true
-	if req.After != 0 {
-		anchor = req.After
-		before = false
+	haveBefore := req.Before != 0
+	haveAfter := req.After != 0
+
+	tx := storage.NewTransaction(db)
+	tx.Start()
+
+	if haveBefore && haveAfter {
+		if req.Before != req.After {
+			c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+			return
+		}
+
+		var beforeMsgs []Message
+		var afterMsgs []Message
+		var anchorMsg Message
+
+		beforeMsgs, err = tx.GetMessagesByAnchor(req.ChannelID, req.Before, req.Limit, true)
+		anchorMsg, err = tx.GetMessage(req.Before)
+		afterMsgs, err = tx.GetMessagesByAnchor(req.ChannelID, req.After, req.Limit, false)
+
+		msgs = make([]Message, 0, len(beforeMsgs)+len(afterMsgs)+1)
+		msgs = append(msgs, beforeMsgs...)
+		msgs = append(msgs, anchorMsg)
+		msgs = append(msgs, afterMsgs...)
+	} else if haveBefore {
+		msgs, err = tx.GetMessagesByAnchor(req.ChannelID, req.Before, req.Limit, true)
+	} else if haveAfter {
+		msgs, err = tx.GetMessagesByAnchor(req.ChannelID, req.After, req.Limit, false)
+	} else {
+		msgs, err = tx.GetMessagesByAnchor(req.ChannelID, 0, req.Limit, true)
 	}
 
-	msgs, err := storage.GetMessages(db, req.ChannelID, anchor, req.Limit, before)
 	if err != nil {
+		tx.Commit(nil)
 		c.HandleError(err)
 		return
 	}
 
+	referenceIDs := make([]Snowflake, 0, len(msgs))
+	for _, msg := range msgs {
+		if msg.ReferenceID != 0 {
+			referenceIDs = append(referenceIDs, msg.ReferenceID)
+		}
+	}
+
+	references := []Message{}
+	if len(referenceIDs) > 0 {
+		references, err = tx.GetMessages(referenceIDs, false)
+		if err != nil {
+			tx.Commit(nil)
+			c.HandleError(err)
+			return
+		}
+	}
+
+	tx.Commit(nil)
+
 	c.Write(Event{
 		Type: EventTypeMessagesResponse,
 		Data: MessagesResponse{
-			ChannelID: req.ChannelID,
-			Before:    req.Before,
-			After:     req.After,
-			Limit:     req.Limit,
-			Messages:  msgs,
+			ChannelID:  req.ChannelID,
+			Before:     req.Before,
+			After:      req.After,
+			Limit:      req.Limit,
+			Messages:   msgs,
+			References: references,
 		},
 	})
 }
@@ -256,7 +325,7 @@ func (c *GatewayConnection) HandleMessageSendRequest(msg *UnknownEvent, db *sqli
 		return
 	}
 
-	permissions := storage.GetPermissions(db, c.userID, req.ChannelID)
+	permissions := storage.NewTransaction(db).GetPermissionsByChannel(c.userID, req.ChannelID)
 	canSendMessages := permissions&PermissionSendMessages != 0
 	canEmbedLinks := permissions&PermissionEmbedLinks != 0
 	canUploadFiles := permissions&PermissionUploadFiles != 0
@@ -278,6 +347,9 @@ func (c *GatewayConnection) HandleMessageSendRequest(msg *UnknownEvent, db *sqli
 	full.Content = req.Content
 	full.Type = MessageTypeDefault
 	full.Timestamp = int(time.Now().UnixMilli())
+	if req.ReferenceID != 0 {
+		full.ReferenceID = req.ReferenceID
+	}
 
 	mentionedUsers, mentionedRoles, mentionedChannels, embeddableURLs := ParseMessageContent(req.Content)
 
@@ -309,21 +381,43 @@ func (c *GatewayConnection) HandleMessageSendRequest(msg *UnknownEvent, db *sqli
 			},
 		})
 	} else {
-		c.HandleMessageSendRequestComplete(&full, msg.Seq, db)
+		err := c.FinalizeMessageSendRequest(&full, msg.Seq, db)
+		if err != nil {
+			c.HandleError(err)
+			return
+		}
 	}
 }
-func (c *GatewayConnection) HandleMessageSendRequestComplete(rawMessage *Message, seq string, db *sqlite.Conn) {
-	storage.AddMessage(db, rawMessage)
+func (c *GatewayConnection) FinalizeMessageSendRequest(rawMessage *Message, seq string, db *sqlite.Conn) error {
+	tx := storage.NewTransaction(db)
 
-	message, err := storage.GetMessage(db, rawMessage.ID)
+	tx.Start()
+	err := tx.AddMessage(rawMessage)
+	if err != nil {
+		tx.Commit(err)
+		return err
+	}
+
+	message, err := tx.GetMessage(rawMessage.ID)
+	if err != nil {
+		tx.Commit(err)
+		return err
+	}
 
 	message.EmbeddableURLs = rawMessage.EmbeddableURLs
 
-	user, err := storage.GetUser(db, message.AuthorID)
+	user, err := tx.GetUser(message.AuthorID)
 	if err != nil {
-		c.HandleError(err)
-		return
+		tx.Commit(err)
+		return err
 	}
+
+	reference := Message{}
+	if message.ReferenceID != 0 {
+		reference, _ = tx.GetMessage(message.ReferenceID)
+	}
+
+	tx.Commit(nil)
 
 	c.Write(Event{
 		Type: EventTypeMessageSendResponse,
@@ -334,13 +428,16 @@ func (c *GatewayConnection) HandleMessageSendRequestComplete(rawMessage *Message
 	})
 
 	gw.OnMessageAdd(&MessageAddEvent{
-		Message: message,
-		Author:  user,
+		Message:   message,
+		Reference: reference,
+		Author:    user,
 	})
 
 	if len(message.EmbeddableURLs) > 0 {
 		go c.TryEmbedURLs(message.ID, message.EmbeddableURLs, db)
 	}
+
+	return nil
 }
 
 func (c *GatewayConnection) HandleMessageUpdateRequest(msg *UnknownEvent, db *sqlite.Conn) {
@@ -350,18 +447,23 @@ func (c *GatewayConnection) HandleMessageUpdateRequest(msg *UnknownEvent, db *sq
 		return
 	}
 
-	full, err := storage.GetMessage(db, req.MessageID)
+	tx := storage.NewTransaction(db)
+	tx.Start()
+
+	full, err := tx.GetMessage(req.MessageID)
 	if err != nil {
+		tx.Commit(err)
 		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
 		return
 	}
 
 	if full.AuthorID != c.userID {
+		tx.Commit(nil)
 		c.HandleError(NewError(ErrorCodeNoPermission, nil))
 		return
 	}
 
-	permissions := storage.GetPermissions(db, c.userID, full.ChannelID)
+	permissions := tx.GetPermissionsByChannel(c.userID, full.ChannelID)
 	canEmbedLinks := permissions&PermissionEmbedLinks != 0
 
 	mentionedUsers, mentionedRoles, mentionedChannels, embeddableURLs := ParseMessageContent(req.Content)
@@ -395,16 +497,20 @@ func (c *GatewayConnection) HandleMessageUpdateRequest(msg *UnknownEvent, db *sq
 		}
 	}
 
-	if err := storage.UpdateMessage(db, req.MessageID, req.Content, mentionedUsers, mentionedRoles, mentionedChannels, deletedEmbeds); err != nil {
+	if err := tx.UpdateMessage(req.MessageID, req.Content, mentionedUsers, mentionedRoles, mentionedChannels, deletedEmbeds); err != nil {
+		tx.Commit(err)
 		c.HandleError(err)
 		return
 	}
 
-	full, err = storage.GetMessage(db, req.MessageID)
+	full, err = tx.GetMessage(req.MessageID)
 	if err != nil {
+		tx.Commit(err)
 		c.HandleError(err)
 		return
 	}
+
+	tx.Commit(nil)
 
 	full.EmbeddableURLs = addedURLs
 
@@ -425,23 +531,32 @@ func (c *GatewayConnection) HandleMessageDeleteRequest(msg *UnknownEvent, db *sq
 		return
 	}
 
-	if msg, err := storage.GetMessage(db, req.MessageID); err != nil {
+	tx := storage.NewTransaction(db)
+	tx.Start()
+
+	if msg, err := tx.GetMessage(req.MessageID); err != nil {
+		tx.Commit(err)
 		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
 		return
 	} else {
 		if msg.AuthorID != c.userID {
-			var permissions = storage.GetPermissions(db, c.userID, msg.ChannelID)
+			var permissions = tx.GetPermissionsByChannel(c.userID, msg.ChannelID)
 			if permissions&PermissionManageMessages == 0 {
-				c.HandleError(NewError(ErrorCodeNoPermission, nil))
+				err := NewError(ErrorCodeNoPermission, nil)
+				tx.Commit(err)
+				c.HandleError(err)
 				return
 			}
 		}
 	}
 
-	if err := storage.DeleteMessage(db, req.MessageID); err != nil {
+	if err := tx.DeleteMessage(req.MessageID); err != nil {
+		tx.Commit(err)
 		c.HandleError(err)
 		return
 	}
+
+	tx.Commit(nil)
 
 	gw.Relay(Event{
 		Type: EventTypeMessageDelete,
@@ -451,23 +566,115 @@ func (c *GatewayConnection) HandleMessageDeleteRequest(msg *UnknownEvent, db *sq
 	})
 }
 
+func (c *GatewayConnection) HandleMessageReactionAddRequest(msg *UnknownEvent, db *sqlite.Conn) {
+	var req ReactionAddEvent
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	tx := storage.NewTransaction(db)
+	tx.Start()
+
+	permissions := tx.GetPermissionsByMessage(c.userID, req.MessageID)
+
+	count, err := tx.GetReactionCount(req.MessageID, req.EmojiID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+	}
+
+	if count == 0 && permissions&PermissionAddReactions == 0 {
+		err := NewError(ErrorCodeNoPermission, nil)
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	if err := tx.AddReaction(req.MessageID, c.userID, req.EmojiID); err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	tx.Commit(nil)
+
+	gw.Relay(Event{
+		Type: EventTypeMessageReactionAdd,
+		Data: ReactionAddEvent{
+			MessageID: req.MessageID,
+			UserID:    c.userID,
+			EmojiID:   req.EmojiID,
+		},
+	})
+}
+
+func (c *GatewayConnection) HandleMessageReactionDeleteRequest(msg *UnknownEvent, db *sqlite.Conn) {
+	var req ReactionDeleteEvent
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	tx := storage.NewTransaction(db)
+	tx.Start()
+
+	if req.UserID != c.userID {
+		permissions := tx.GetPermissionsByMessage(c.userID, req.MessageID)
+		if permissions&PermissionManageMessages == 0 {
+			err := NewError(ErrorCodeNoPermission, nil)
+			tx.Commit(err)
+			c.HandleError(err)
+			return
+		}
+	}
+
+	if err := tx.DeleteReaction(req.MessageID, c.userID, req.EmojiID); err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	tx.Commit(nil)
+
+	gw.Relay(Event{
+		Type: EventTypeMessageReactionDelete,
+		Data: ReactionDeleteEvent{
+			MessageID: req.MessageID,
+			UserID:    c.userID,
+			EmojiID:   req.EmojiID,
+		},
+	})
+}
+
 func (c *GatewayConnection) TryEmbedURLs(id Snowflake, urls []string, db *sqlite.Conn) {
+	tx := storage.NewTransaction(db)
+	tx.Start()
+
 	for _, url := range urls {
-		embed, err := GetEmbedFromURL(context.Background(), db, url)
+		embed, err := GetEmbedFromURL(context.Background(), id, url)
 		if err != nil || embed == nil {
 			fmt.Println("Failed to get embed from URL:", err)
 			continue
 		}
 		embed.ID = snowflake.New()
 
-		storage.AddEmbed(db, id, embed)
-
+		err = tx.AddEmbed(id, embed)
+		if err != nil {
+			tx.Commit(err)
+			c.HandleError(err)
+			return
+		}
 	}
-	message, err := storage.GetMessage(db, id)
+	message, err := tx.GetMessage(id)
 	if err != nil {
+		tx.Commit(err)
 		c.HandleError(err)
 		return
 	}
+
+	tx.Commit(nil)
+
 	gw.Relay(Event{
 		Type: EventTypeMessageUpdate,
 		Data: MessageUpdateEvent{

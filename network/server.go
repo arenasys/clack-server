@@ -6,14 +6,12 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"sync"
 
 	"github.com/gorilla/mux"
 
 	"clack/common"
 )
 
-var srvWait sync.WaitGroup
 var srvCtx context.Context
 var srvLog = common.NewLogger("SERVER")
 
@@ -35,9 +33,9 @@ func buildRouter() *mux.Router {
 	return r
 }
 
-func StartServer(ctx context.Context) *sync.WaitGroup {
+func StartServer(ctx *common.ClackContext) {
 	srvCtx = ctx
-	srvWait.Add(1)
+	ctx.Subsystems.Add(1)
 	port := ":8000"
 
 	srvLog.Printf("Starting on %s\n", port)
@@ -53,7 +51,7 @@ func StartServer(ctx context.Context) *sync.WaitGroup {
 		<-srvCtx.Done()
 		srv.Shutdown(context.Background())
 		srvLog.Println("Finished")
-		srvWait.Done()
+		ctx.Subsystems.Done()
 	}()
 
 	go func() {
@@ -61,6 +59,4 @@ func StartServer(ctx context.Context) *sync.WaitGroup {
 			srvLog.Fatalf("ListenAndServe(): %v", err)
 		}
 	}()
-
-	return &srvWait
 }

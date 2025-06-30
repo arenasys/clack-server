@@ -39,11 +39,11 @@ func tryExecuteStatement(stmt *sqlite.Stmt) bool {
 func PopulateDatabase(ctx context.Context) {
 	// populate database with fake data
 
-	db, err := storage.OpenDatabase(ctx)
+	db, err := storage.OpenConnection(ctx)
 	if err != nil {
 		panic(err)
 	}
-	defer storage.CloseDatabase(db)
+	defer storage.CloseConnection(db)
 
 	var settings Settings = Settings{
 		SiteName:           "Clack",
@@ -57,7 +57,10 @@ func PopulateDatabase(ctx context.Context) {
 		CaptchaSecretKey:   "ES_040e28547c354609b8d8c0e7a630f6d3",
 	}
 
-	storage.SetSettings(db, settings)
+	tx := storage.NewTransaction(db)
+	tx.Start()
+	err = tx.SetSettings(settings)
+	tx.Commit(err)
 
 	rng := rand.New(rand.NewSource(101))
 
@@ -106,7 +109,7 @@ func PopulateDatabase(ctx context.Context) {
 
 		var password = fake.SimplePassword()
 		var salt = GetRandom128()
-		var hash = HashPassword(HashPassword(password, ""), salt)
+		var hash = HashSha256(HashSha256(password, ""), salt)
 
 		user.SetInt64("$id", int64(userID))
 		user.SetText("$username", fake.UserName()+GetRandom128()[:5])
@@ -220,7 +223,7 @@ func createMainUser(db *sqlite.Conn, role Snowflake) {
 	id := snowflake.New()
 	var password = "password"
 	var salt = GetRandom128()
-	var hash = HashPassword(HashPassword(password, ""), salt)
+	var hash = HashSha256(HashSha256(password, ""), salt)
 
 	user.SetInt64("$id", int64(id))
 	user.SetText("$username", "user")
@@ -304,13 +307,19 @@ func createMessage(db *sqlite.Conn, channelID Snowflake, users []Snowflake, role
 	}
 
 	for _, embeddableURL := range embeddableURLs {
-		embed, err := chat.GetEmbedFromURL(context.Background(), db, embeddableURL)
+		embed, err := chat.GetEmbedFromURL(context.Background(), messageID, embeddableURL)
 		if err != nil {
 			fmt.Println(err)
 			continue
 		}
 
-		storage.AddEmbed(db, messageID, embed)
+		tx := storage.NewTransaction(db)
+		tx.Start()
+		err = tx.AddEmbed(messageID, embed)
+		if err != nil {
+			panic(err)
+		}
+		tx.Commit(err)
 	}
 
 	return messageID
@@ -327,5 +336,18 @@ func createAttachment(db *sqlite.Conn, messageID Snowflake, path string) {
 
 	name := filepath.Base(path)
 
-	storage.UploadAttachment(db, messageID, name, &reader)
+	attachmentID := snowflake.New()
+
+	attachment, err := storage.UploadAttachment(messageID, attachmentID, name, &reader)
+	if err != nil {
+		panic(err)
+	}
+
+	tx := storage.NewTransaction(db)
+	tx.Start()
+	err = tx.AddAttachment(messageID, attachment)
+	if err != nil {
+		panic(err)
+	}
+	tx.Commit(err)
 }

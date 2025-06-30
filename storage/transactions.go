@@ -2,41 +2,113 @@ package storage
 
 import (
 	. "clack/common"
+	"clack/common/emoji"
 	"clack/common/snowflake"
 	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"slices"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/gabriel-vasile/mimetype"
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
 )
+
+var txMutex sync.Mutex
+var txLastWrite time.Time
+
+type Transaction struct {
+	conn    *sqlite.Conn
+	commit  func(*error)
+	isWrite bool
+}
+
+func NewTransaction(conn *sqlite.Conn) *Transaction {
+	return &Transaction{
+		conn:    conn,
+		commit:  nil,
+		isWrite: false,
+	}
+}
+
+func (tx *Transaction) MarkAsWrite() *Transaction {
+	tx.isWrite = true
+	return tx
+}
+
+func (tx *Transaction) UpdateLastWrite() {
+	txMutex.Lock()
+	defer txMutex.Unlock()
+	now := time.Now()
+	if now.After(txLastWrite) {
+		txLastWrite = now
+	}
+}
+
+func (tx *Transaction) Start() {
+	if tx.commit != nil {
+		return
+	}
+	tx.commit = sqlitex.Transaction(tx.conn)
+	if tx.commit == nil {
+		panic("failed to begin transaction")
+	}
+}
+
+func (tx *Transaction) Commit(err error) {
+	if tx.commit == nil {
+		return
+	}
+
+	var noError error = nil
+	if err != nil {
+		tx.commit(&err)
+	} else {
+		tx.commit(&noError)
+		if tx.isWrite {
+			tx.UpdateLastWrite()
+		}
+	}
+	tx.commit = nil
+}
+
+func (tx *Transaction) Prepare(query string) *sqlite.Stmt {
+	if tx.isWrite && tx.commit == nil {
+		panic("writes must be inside of a transaction")
+	}
+
+	stmt, err := tx.conn.Prepare(query)
+	if err != nil {
+		panic(fmt.Errorf("failed to prepare statement: %w", err))
+	}
+	return stmt
+}
+
+func (tx Transaction) Finish(stmt *sqlite.Stmt) {
+	if err := stmt.Reset(); err != nil {
+		panic(fmt.Errorf("failed to reset statement: %w", err))
+	}
+	if err := stmt.ClearBindings(); err != nil {
+		panic(fmt.Errorf("failed to clear bindings: %w", err))
+	}
+}
+
+func (tx *Transaction) Execute(stmt *sqlite.Stmt) (bool, error) {
+	hasRow, err := stmt.Step()
+	if err != nil {
+		return false, fmt.Errorf("failed to execute statement: %w", err)
+	}
+	return hasRow, nil
+}
 
 // Data Access Layer
 
 var ErrFileNotFound = errors.New("file not found")
 
-func ExecuteStatement(stmt *sqlite.Stmt) (bool, error) {
-	hasRow, err := stmt.Step()
-	if err != nil {
-		return false, fmt.Errorf("failed to execute statement: %w", err)
-	}
-	stmt.Reset()
-	err = stmt.ClearBindings()
-	if err != nil {
-		return false, fmt.Errorf("failed to clear bindings: %w", err)
-	}
-	return hasRow, nil
-}
-
-func Initialize(conn *sqlite.Conn) {
+func (tx *Transaction) Initialize() {
+	tx.MarkAsWrite()
 	query := `
 		INSERT OR IGNORE INTO settings(
 			id,
@@ -62,8 +134,8 @@ func Initialize(conn *sqlite.Conn) {
 			$captcha_secret_key
 	);`
 
-	stmt := conn.Prep(query)
-	defer stmt.Reset()
+	stmt := tx.Prepare(query)
+	defer tx.Finish(stmt)
 
 	stmt.SetText("$site_name", "Clack")
 	stmt.SetText("$site_message", "Welcome to Clack!")
@@ -75,12 +147,22 @@ func Initialize(conn *sqlite.Conn) {
 	stmt.SetText("$captcha_site_key", "")
 	stmt.SetText("$captcha_secret_key", "")
 
-	if _, err := ExecuteStatement(stmt); err != nil {
-		panic(fmt.Errorf("failed to initialize database: %w", err))
+	if _, err := tx.Execute(stmt); err != nil {
+		panic(NewError(ErrorCodeInternalError, fmt.Errorf("failed to initialize database: %w", err)))
 	}
 }
 
-func queryUsers(conn *sqlite.Conn, id Snowflake) []User {
+func (tx *Transaction) Checkpoint() {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare("PRAGMA wal_checkpoint(TRUNCATE);")
+	defer tx.Finish(stmt)
+
+	if _, err := tx.Execute(stmt); err != nil {
+		panic(NewError(ErrorCodeInternalError, fmt.Errorf("failed to checkpoint database: %w", err)))
+	}
+}
+
+func (tx *Transaction) QueryUsers(id Snowflake) []User {
 	query := `SELECT
 			u.id,
 			u.username,
@@ -94,8 +176,8 @@ func queryUsers(conn *sqlite.Conn, id Snowflake) []User {
 	if id != 0 {
 		query += ` WHERE u.id = $id`
 	}
-	stmt := conn.Prep(query + " ORDER BY u.id;")
-	defer stmt.Reset()
+	stmt := tx.Prepare(query + " ORDER BY u.id;")
+	defer tx.Finish(stmt)
 
 	if id != 0 {
 		stmt.SetInt64("$id", int64(id))
@@ -134,19 +216,19 @@ func queryUsers(conn *sqlite.Conn, id Snowflake) []User {
 	return users
 }
 
-func GetUser(conn *sqlite.Conn, id Snowflake) (User, error) {
-	users := queryUsers(conn, id)
+func (tx *Transaction) GetUser(id Snowflake) (User, error) {
+	users := tx.QueryUsers(id)
 	if len(users) == 0 {
-		return User{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("user with ID %d not found", id))
+		return User{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("user not found", id))
 	}
 	return users[0], nil
 }
 
-func GetAllUsers(conn *sqlite.Conn) []User {
-	return queryUsers(conn, 0)
+func (tx *Transaction) GetAllUsers() []User {
+	return tx.QueryUsers(0)
 }
 
-func queryChannels(conn *sqlite.Conn, id Snowflake) []Channel {
+func (tx *Transaction) QueryChannels(id Snowflake) []Channel {
 	query := `SELECT
 			c.id,
 			c.type,
@@ -169,8 +251,8 @@ func queryChannels(conn *sqlite.Conn, id Snowflake) []Channel {
 	if id != 0 {
 		query += ` WHERE c.id = $id`
 	}
-	stmt := conn.Prep(query + ` ORDER BY c.id;`)
-	defer stmt.Reset()
+	stmt := tx.Prepare(query + ` ORDER BY c.id;`)
+	defer tx.Finish(stmt)
 
 	if id != 0 {
 		stmt.SetInt64("$id", int64(id))
@@ -240,19 +322,46 @@ func queryChannels(conn *sqlite.Conn, id Snowflake) []Channel {
 	return channels
 }
 
-func GetChannel(conn *sqlite.Conn, id Snowflake) (Channel, error) {
-	channels := queryChannels(conn, id)
+func (tx *Transaction) GetChannel(id Snowflake) (Channel, error) {
+	channels := tx.QueryChannels(id)
 	if len(channels) == 0 {
-		return Channel{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("channel with ID %d not found", id))
+		return Channel{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("channel not found"))
 	}
 	return channels[0], nil
 }
 
-func GetAllChannels(conn *sqlite.Conn) []Channel {
-	return queryChannels(conn, 0)
+func (tx *Transaction) GetAllChannels() []Channel {
+	return tx.QueryChannels(0)
 }
 
-func queryRoles(conn *sqlite.Conn, id Snowflake) []Role {
+func (tx *Transaction) GetChannelByMessage(messageID Snowflake) (Snowflake, error) {
+	stmt := tx.Prepare(`
+		SELECT
+			channel_id
+		FROM
+			messages
+		WHERE
+			id = $id;`,
+	)
+	defer tx.Finish(stmt)
+
+	stmt.SetInt64("$id", int64(messageID))
+
+	hasRow, err := stmt.Step()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get channel by message: %w", err)
+	}
+
+	if !hasRow {
+		return 0, NewError(ErrorCodeInvalidRequest, fmt.Errorf("message not found"))
+	}
+
+	channel_id := Snowflake(stmt.GetInt64("channel_id"))
+
+	return channel_id, nil
+}
+
+func (tx *Transaction) QueryRoles(id Snowflake) []Role {
 	query := `SELECT
 			id,
 			name,
@@ -266,8 +375,8 @@ func queryRoles(conn *sqlite.Conn, id Snowflake) []Role {
 	if id != 0 {
 		query += ` WHERE id = $id`
 	}
-	stmt := conn.Prep(query + ` ORDER BY id;`)
-	defer stmt.Reset()
+	stmt := tx.Prepare(query + ` ORDER BY id;`)
+	defer tx.Finish(stmt)
 
 	if id != 0 {
 		stmt.SetInt64("$id", int64(id))
@@ -290,19 +399,19 @@ func queryRoles(conn *sqlite.Conn, id Snowflake) []Role {
 	return roles
 }
 
-func GetRole(conn *sqlite.Conn, id Snowflake) (Role, error) {
-	roles := queryRoles(conn, id)
+func (tx *Transaction) GetRole(id Snowflake) (Role, error) {
+	roles := tx.QueryRoles(id)
 	if len(roles) == 0 {
-		return Role{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("role with ID %d not found", id))
+		return Role{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("role not found"))
 	}
 	return roles[0], nil
 }
 
-func GetAllRoles(conn *sqlite.Conn) []Role {
-	return queryRoles(conn, 0)
+func (tx *Transaction) GetAllRoles() []Role {
+	return tx.QueryRoles(0)
 }
 
-func queryEmojis(conn *sqlite.Conn, id Snowflake) []Emoji {
+func (tx *Transaction) QueryEmojis(id Snowflake) []Emoji {
 	query := `SELECT
 			name,
 			id
@@ -311,8 +420,8 @@ func queryEmojis(conn *sqlite.Conn, id Snowflake) []Emoji {
 	if id != 0 {
 		query += ` WHERE id = $id`
 	}
-	stmt := conn.Prep(query + ` ORDER BY name;`)
-	defer stmt.Reset()
+	stmt := tx.Prepare(query + ` ORDER BY name;`)
+	defer tx.Finish(stmt)
 
 	emojis := []Emoji{}
 
@@ -327,38 +436,51 @@ func queryEmojis(conn *sqlite.Conn, id Snowflake) []Emoji {
 	return emojis
 }
 
-func GetEmoji(conn *sqlite.Conn, id Snowflake) (Emoji, error) {
-	emojis := queryEmojis(conn, id)
-	if len(emojis) == 0 {
+func (tx *Transaction) GetEmoji(id Snowflake) (Emoji, error) {
+	emjs := tx.QueryEmojis(id)
+	if len(emjs) == 0 {
 		return Emoji{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("emoji with ID %d not found", id))
 	}
-	return emojis[0], nil
+	return emjs[0], nil
 }
 
-func GetAllEmojis(conn *sqlite.Conn) []Emoji {
-	return queryEmojis(conn, 0)
+func (tx *Transaction) GetAllEmojis() []Emoji {
+	return tx.QueryEmojis(0)
 }
 
-func UseToken(conn *sqlite.Conn, token string) error {
-	stmt := conn.Prep(`
+func (tx *Transaction) ValidateEmoji(emojiID Snowflake) bool {
+	if emoji.IsUnicodeEmojiID(int64(emojiID)) {
+		return true
+	} else {
+		if _, err := tx.GetEmoji(emojiID); err == nil {
+			return true
+		} else {
+			return false
+		}
+	}
+}
+
+func (tx *Transaction) UseToken(token string) error {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`
 		UPDATE user_tokens
 		SET last_used_at = $last_used_at
 		WHERE token = $token;`,
 	)
-	defer stmt.Reset()
+	defer tx.Finish(stmt)
 
 	now := time.Now().UnixMilli()
 	stmt.SetText("$token", token)
 	stmt.SetInt64("$last_used_at", now)
-	if _, err := ExecuteStatement(stmt); err != nil {
+	if _, err := tx.Execute(stmt); err != nil {
 		return NewError(ErrorCodeInternalError, err)
 	}
 
 	return nil
 }
 
-func Authenticate(conn *sqlite.Conn, token string) (Snowflake, error) {
-	stmt := conn.Prep(`
+func (tx *Transaction) Authenticate(token string) (Snowflake, error) {
+	stmt := tx.Prepare(`
 		SELECT
 			user_id
 		FROM
@@ -366,7 +488,7 @@ func Authenticate(conn *sqlite.Conn, token string) (Snowflake, error) {
 		WHERE
 			token = $token;`,
 	)
-	defer stmt.Reset()
+	defer tx.Finish(stmt)
 
 	stmt.SetText("$token", token)
 
@@ -379,7 +501,7 @@ func Authenticate(conn *sqlite.Conn, token string) (Snowflake, error) {
 		return 0, NewError(ErrorCodeInvalidToken, nil)
 	}
 
-	if err := UseToken(conn, token); err != nil {
+	if err := tx.UseToken(token); err != nil {
 		return 0, err
 	}
 
@@ -387,11 +509,13 @@ func Authenticate(conn *sqlite.Conn, token string) (Snowflake, error) {
 	return userID, nil
 }
 
-func AddToken(conn *sqlite.Conn, userID Snowflake) (string, error) {
-	stmt := conn.Prep(`
+func (tx *Transaction) AddToken(userID Snowflake) (string, error) {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`
 		INSERT INTO user_tokens(user_id, token, created_at, last_used_at)
 		VALUES ($user_id, $token, $created_at, $last_used_at);`,
 	)
+	defer tx.Finish(stmt)
 
 	token := GetRandom256()
 	now := time.Now().UnixMilli()
@@ -401,15 +525,15 @@ func AddToken(conn *sqlite.Conn, userID Snowflake) (string, error) {
 	stmt.SetInt64("$created_at", now)
 	stmt.SetInt64("$last_used_at", now)
 
-	if _, err := ExecuteStatement(stmt); err != nil {
+	if _, err := tx.Execute(stmt); err != nil {
 		return "", NewError(ErrorCodeInternalError, err)
 	}
 
 	return token, nil
 }
 
-func Login(conn *sqlite.Conn, username, password string) (Snowflake, string, error) {
-	stmt := conn.Prep(`
+func (tx *Transaction) Login(username, password string) (Snowflake, string, error) {
+	stmt := tx.Prepare(`
 		SELECT
 			id,
 			hash,
@@ -419,7 +543,7 @@ func Login(conn *sqlite.Conn, username, password string) (Snowflake, string, err
 		WHERE
 			username = $username`,
 	)
-	defer stmt.Reset()
+	defer tx.Finish(stmt)
 
 	stmt.SetText("$username", username)
 
@@ -436,23 +560,23 @@ func Login(conn *sqlite.Conn, username, password string) (Snowflake, string, err
 	hash := stmt.GetText("hash")
 	userID := Snowflake(stmt.GetInt64("id"))
 
-	if hash != HashPassword(password, salt) {
+	if hash != HashSha256(password, salt) {
 		return 0, "", NewError(ErrorCodeInvalidCredentials, fmt.Errorf("invalid password"))
 	}
 
-	if token, err := AddToken(conn, userID); err != nil {
+	if token, err := tx.AddToken(userID); err != nil {
 		return 0, "", err
 	} else {
 		return userID, token, nil
 	}
 }
 
-func IsUsernameValid(conn *sqlite.Conn, username string) (bool, error) {
+func (tx *Transaction) IsUsernameValid(username string) (bool, error) {
 	if username == "" || len(username) < 3 || len(username) > 32 {
 		return false, NewError(ErrorCodeInvalidUsername, nil)
 	}
 
-	stmt := conn.Prep(`
+	stmt := tx.Prepare(`
 		SELECT
 			username
 		FROM
@@ -460,33 +584,38 @@ func IsUsernameValid(conn *sqlite.Conn, username string) (bool, error) {
 		WHERE
 			username = $username;`,
 	)
-	defer stmt.Reset()
+	defer tx.Finish(stmt)
 
 	stmt.SetText("$username", username)
 
-	ok, _ := ExecuteStatement(stmt)
+	found, err := tx.Execute(stmt)
 
-	if ok {
+	if err != nil {
+		return false, NewError(ErrorCodeInternalError, err)
+	}
+
+	if found {
 		return false, NewError(ErrorCodeTakenUsername, nil)
 	}
 
 	return true, nil
 }
 
-func Register(conn *sqlite.Conn, username, password, email, inviteCode string) (Snowflake, string, error) {
-	if _, err := IsUsernameValid(conn, username); err != nil {
+func (tx *Transaction) Register(username, password, email, inviteCode string) (Snowflake, string, error) {
+	tx.MarkAsWrite()
+	if _, err := tx.IsUsernameValid(username); err != nil {
 		return 0, "", err
 	}
 
-	stmt := conn.Prep(`
+	stmt := tx.Prepare(`
 		INSERT INTO users(id, username, hash, salt, email, invite_code)
 		VALUES ($id, $username, $hash, $salt, $email, $invite_code);`,
 	)
-	defer stmt.Reset()
+	defer tx.Finish(stmt)
 
 	userID := snowflake.New()
 	salt := GetRandom128()
-	hash := HashPassword(password, salt)
+	hash := HashSha256(password, salt)
 
 	stmt.SetInt64("$id", int64(userID))
 	stmt.SetText("$username", username)
@@ -505,11 +634,11 @@ func Register(conn *sqlite.Conn, username, password, email, inviteCode string) (
 		stmt.SetNull("$invite_code")
 	}
 
-	if _, err := ExecuteStatement(stmt); err != nil {
+	if _, err := tx.Execute(stmt); err != nil {
 		return 0, "", NewError(ErrorCodeInternalError, err)
 	}
 
-	token, err := AddToken(conn, userID)
+	token, err := tx.AddToken(userID)
 	if err != nil {
 		return 0, "", err
 	}
@@ -517,8 +646,8 @@ func Register(conn *sqlite.Conn, username, password, email, inviteCode string) (
 	return userID, token, nil
 }
 
-func GetSettings(conn *sqlite.Conn) (Settings, error) {
-	stmt := conn.Prep(`
+func (tx *Transaction) GetSettings() (Settings, error) {
+	stmt := tx.Prepare(`
 		SELECT
 			site_name,
 			login_message,
@@ -533,7 +662,7 @@ func GetSettings(conn *sqlite.Conn) (Settings, error) {
 			settings
 		WHERE id = 0;`,
 	)
-	defer stmt.Reset()
+	defer tx.Finish(stmt)
 
 	hasRow, err := stmt.Step()
 	if err != nil {
@@ -559,8 +688,9 @@ func GetSettings(conn *sqlite.Conn) (Settings, error) {
 	return settings, nil
 }
 
-func SetSettings(conn *sqlite.Conn, settings Settings) error {
-	stmt := conn.Prep(`
+func (tx *Transaction) SetSettings(settings Settings) error {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`
 		UPDATE settings
 		SET
 			site_name = $site_name,
@@ -574,7 +704,7 @@ func SetSettings(conn *sqlite.Conn, settings Settings) error {
 			captcha_secret_key = $captcha_secret_key
 		WHERE id = 0;`,
 	)
-	defer stmt.Reset()
+	defer tx.Finish(stmt)
 
 	stmt.SetText("$site_name", settings.SiteName)
 	stmt.SetText("$login_message", settings.LoginMessage)
@@ -586,7 +716,7 @@ func SetSettings(conn *sqlite.Conn, settings Settings) error {
 	stmt.SetText("$captcha_site_key", settings.CaptchaSiteKey)
 	stmt.SetText("$captcha_secret_key", settings.CaptchaSecretKey)
 
-	_, err := ExecuteStatement(stmt)
+	_, err := tx.Execute(stmt)
 	if err != nil {
 		return NewError(ErrorCodeInternalError, err)
 	}
@@ -595,12 +725,12 @@ func SetSettings(conn *sqlite.Conn, settings Settings) error {
 }
 
 //go:embed sql/message_query.sql
-var message_query string
+var message_query_string string
 
 // TODO: Maybe split into multiple queries.
-func GetMessages(conn *sqlite.Conn, channelID Snowflake, anchorID Snowflake, limit int, before bool) ([]Message, error) {
+func (tx *Transaction) GetMessagesByAnchor(channelID Snowflake, anchorID Snowflake, limit int, before bool) ([]Message, error) {
 	// Start with the base query from the embedded SQL file
-	baseQuery := strings.TrimSuffix(message_query, ";")
+	baseQuery := strings.TrimSuffix(message_query_string, ";")
 
 	var finalQuery string
 	var params []int64
@@ -629,19 +759,14 @@ func GetMessages(conn *sqlite.Conn, channelID Snowflake, anchorID Snowflake, lim
 		params = append(params, int64(channelID), int64(limit))
 	}
 
-	// Prepare the final statement
-	stmt, err := conn.Prepare(finalQuery)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare message query: %w", err)
-	}
-	defer stmt.Reset()
+	stmt := tx.Prepare(finalQuery)
+	defer tx.Finish(stmt)
 
-	// Bind parameters to the statement
 	for i, param := range params {
 		stmt.BindInt64(i+1, param)
 	}
 
-	messages, err := parseMessagesFromStmt(conn, stmt)
+	messages, err := tx.QueryMessages(stmt)
 	if err != nil {
 		return nil, err
 	}
@@ -656,32 +781,46 @@ func GetMessages(conn *sqlite.Conn, channelID Snowflake, anchorID Snowflake, lim
 	return messages, nil
 }
 
-func GetMessage(conn *sqlite.Conn, id Snowflake) (Message, error) {
-	baseQuery := strings.TrimSuffix(message_query, ";")
-	finalQuery := baseQuery + ` WHERE m.id = $id;`
+func (tx *Transaction) GetMessages(ids []Snowflake, required bool) ([]Message, error) {
+	baseQuery := strings.TrimSuffix(message_query_string, ";")
+	query := baseQuery + ` WHERE m.id = $id;`
 
-	stmt, err := conn.Prepare(finalQuery)
-	if err != nil {
-		return Message{}, fmt.Errorf("failed to prepare message query: %w", err)
+	stmt := tx.Prepare(query)
+	defer tx.Finish(stmt)
+
+	messages := make([]Message, 0, len(ids))
+
+	for _, id := range ids {
+		stmt.SetInt64("$id", int64(id))
+
+		parsed, err := tx.QueryMessages(stmt)
+		stmt.Reset()
+
+		if err != nil {
+			return nil, err
+		}
+
+		if len(parsed) == 0 {
+			if required {
+				return nil, fmt.Errorf("message with ID %d not found", id)
+			} else {
+				continue
+			}
+		}
+		messages = append(messages, parsed[0])
 	}
-	defer stmt.Reset()
+	return messages, nil
+}
 
-	stmt.SetInt64("$id", int64(id))
-
-	messages, err := parseMessagesFromStmt(conn, stmt)
-	if err != nil {
+func (tx *Transaction) GetMessage(id Snowflake) (Message, error) {
+	messages, err := tx.GetMessages([]Snowflake{id}, true)
+	if err != nil || len(messages) == 0 {
 		return Message{}, err
 	}
-
-	if len(messages) == 0 {
-		return Message{}, fmt.Errorf("message not found")
-	}
-
 	return messages[0], nil
 }
 
-func parseMessagesFromStmt(conn *sqlite.Conn, stmt *sqlite.Stmt) ([]Message, error) {
-
+func (tx *Transaction) QueryMessages(stmt *sqlite.Stmt) ([]Message, error) {
 	messages := []Message{}
 
 	// Iterate over the result rows
@@ -745,229 +884,32 @@ func parseMessagesFromStmt(conn *sqlite.Conn, stmt *sqlite.Stmt) ([]Message, err
 	return messages, nil
 }
 
-func GetFile(conn *sqlite.Conn, name string) (*File, error) {
-	stmt := conn.Prep(`
-		SELECT
-			rowid,
-			sz AS size,
-			mtime AS modified
-		FROM
-			sqlar s
-		WHERE
-			name = $name`,
+func (tx *Transaction) AddPreviews(id Snowflake, width, height int, preload string) error {
+	tx.MarkAsWrite()
+
+	preview_stmt := tx.Prepare(`
+		INSERT INTO previews(id, width, height, preload)
+		VALUES ($id, $width, $height, $preload);`,
 	)
-
-	stmt.SetText("$name", name)
-
-	hasRow, err := stmt.Step()
-	if err != nil {
-		panic(err)
-	}
-	defer stmt.Reset()
-
-	if !hasRow {
-		disk, err := os.Open(filepath.Join(DataFolder, name))
-		if err == nil {
-			stat, err := disk.Stat()
-			if err != nil {
-				disk.Close()
-				return nil, fmt.Errorf("failed to stat file: %w", err)
-			}
-			return &File{
-				Name:     name,
-				Size:     int(stat.Size()),
-				Modified: stat.ModTime(),
-				Content:  &DiskReader{File: disk},
-			}, nil
-		}
-		return nil, ErrFileNotFound
-	}
-
-	rowid := stmt.GetInt64("rowid")
-	content, err := conn.OpenBlob("main", "sqlar", "data", rowid, false)
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to open blob: %w", err)
-	}
-
-	return &File{
-		Name:     name,
-		Size:     int(stmt.GetInt64("size")),
-		Modified: time.Unix(stmt.GetInt64("modified"), 0),
-		Content:  content,
-	}, nil
-}
-
-func GetPreview(conn *sqlite.Conn, id Snowflake, typ string) (*File, error) {
-	name := GetPreviewPath(id, typ)
-	content, err := GetFile(conn, name)
-
-	if err != nil {
-		return nil, err
-	}
-
-	content.Mimetype = "image/webp"
-	return content, nil
-}
-
-func GetAttachment(conn *sqlite.Conn, id Snowflake, filename string) (*File, error) {
-	//fmt.Println("GetAttachment", id, filename)
-
-	stmt := conn.Prep(`
-		SELECT 
-			filename,
-			mimetype,
-			path
-		FROM 
-				attachments a
-		WHERE 
-				id = $id AND filename = $filename;`,
-	)
-	stmt.SetInt64("$id", int64(id))
-	stmt.SetText("$filename", filename)
-
-	hasRow, err := stmt.Step()
-	if err != nil {
-		panic(err)
-	}
-
-	if hasRow {
-		name := stmt.GetText("filename")
-		mimetype := stmt.GetText("mimetype")
-		path := stmt.GetText("path")
-		stmt.Reset()
-		file, err := GetFile(conn, path)
-		if err != nil {
-			fmt.Println(path)
-			return nil, fmt.Errorf("failed to get file: %w", err)
-		}
-
-		file.Mimetype = mimetype
-		file.Name = name
-
-		return file, nil
-	} else {
-		stmt.Reset()
-		return nil, ErrFileNotFound
-	}
-
-}
-
-func GetAttachmentPath(id Snowflake, filename string) string {
-	return fmt.Sprintf("attachments/%d/%s", id, filename)
-}
-
-func GetPreviewPath(id Snowflake, typ string) string {
-	return fmt.Sprintf("previews/%d/%s.webp", id, typ)
-}
-
-func AddFile(conn *sqlite.Conn, name string, content FileInputReader) error {
-	size := content.Size()
-
-	if size > MaxDatabaseFileSize {
-		file := filepath.Join(DataFolder, name)
-		os.MkdirAll(filepath.Dir(file), 0755)
-
-		disk, err := os.Create(file)
-		if err != nil {
-			return fmt.Errorf("failed to create file: %w", err)
-		}
-		defer disk.Close()
-
-		_, err = io.Copy(disk, content)
-		if err != nil {
-			os.Remove(file)
-			os.RemoveAll(filepath.Dir(file))
-			return fmt.Errorf("failed to write file: %w", err)
-		}
-
-		return nil
-	}
-
-	stmt := conn.Prep(`
-		INSERT INTO sqlar(name, mode, mtime, sz, data)
-		VALUES ($name, 420, strftime('%s','now'), $size, zeroblob($size));`,
-	)
-	defer stmt.Reset()
-
-	stmt.SetText("$name", name)
-	stmt.SetInt64("$size", size)
-
-	_, err := stmt.Step()
-	if err != nil {
-		panic(err)
-	}
-
-	blob, err := conn.OpenBlob("main", "sqlar", "data", conn.LastInsertRowID(), true)
-	if err != nil {
-		return fmt.Errorf("failed to open blob: %w", err)
-	}
-
-	_, write_err := io.Copy(blob, content)
-	blob_err := blob.Close()
-	content_err := content.Close()
-	if write_err != nil {
-		return fmt.Errorf("failed to write blob: %w", write_err)
-	}
-	if blob_err != nil {
-		return fmt.Errorf("failed to close blob: %w", blob_err)
-	}
-	if content_err != nil {
-		return fmt.Errorf("failed to close content: %w", content_err)
-	}
-
-	return nil
-}
-
-func AddPreviews(conn *sqlite.Conn, id Snowflake, previews *Previews) error {
-	sqlar_stmt := conn.Prep(`
-		INSERT INTO sqlar(name, mode, mtime, sz, data) 
-		VALUES
-			($display, 420, strftime('%s','now'), length($display_data), $display_data),
-			($preview, 420, strftime('%s','now'), length($preview_data), $preview_data),
-			($blur, 420, strftime('%s','now'), length($blur_data), $blur_data);`,
-	)
-	defer sqlar_stmt.Reset()
-
-	preview_stmt := conn.Prep(`
-		INSERT INTO previews(id, width, height, display, preview, blur)
-		VALUES ($id, $width, $height, $display, $preview, $blur);`,
-	)
-	defer preview_stmt.Reset()
-
-	display_path := GetPreviewPath(id, "display")
-	preview_path := GetPreviewPath(id, "preview")
-	blur_path := GetPreviewPath(id, "blur")
-
-	sqlar_stmt.SetText("$display", display_path)
-	sqlar_stmt.SetText("$preview", preview_path)
-	sqlar_stmt.SetText("$blur", blur_path)
-	sqlar_stmt.SetBytes("$display_data", previews.Display)
-	sqlar_stmt.SetBytes("$preview_data", previews.Preview)
-	sqlar_stmt.SetBytes("$blur_data", previews.Blur)
-	_, err := sqlar_stmt.Step()
-	if err != nil {
-		return err
-	}
+	defer tx.Finish(preview_stmt)
 
 	preview_stmt.SetInt64("$id", int64(id))
-	preview_stmt.SetInt64("$width", int64(previews.Width))
-	preview_stmt.SetInt64("$height", int64(previews.Height))
-	preview_stmt.SetText("$display", display_path)
-	preview_stmt.SetText("$preview", preview_path)
-	preview_stmt.SetText("$blur", blur_path)
-	_, err = preview_stmt.Step()
-	if err != nil {
-		return err
+	preview_stmt.SetInt64("$width", int64(width))
+	preview_stmt.SetInt64("$height", int64(height))
+	preview_stmt.SetText("$preload", preload)
+
+	if _, err := tx.Execute(preview_stmt); err != nil {
+		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to insert previews: %w", err))
 	}
 
 	return nil
 }
 
-func AddAttachment(conn *sqlite.Conn, messageID Snowflake, attachment *Attachment) error {
-	attach_stmt := conn.Prep(`
-		INSERT INTO attachments(id, message_id, type, mimetype, filename, path)
-		VALUES ($id, $message_id, $type, $mimetype, $filename, $path);`,
+func (tx *Transaction) AddAttachment(messageID Snowflake, attachment *Attachment) error {
+	tx.MarkAsWrite()
+	attach_stmt := tx.Prepare(`
+		INSERT INTO attachments(id, message_id, type, mimetype, filename, size)
+		VALUES ($id, $message_id, $type, $mimetype, $filename, $size);`,
 	)
 
 	attach_stmt.SetInt64("$id", int64(attachment.ID))
@@ -975,23 +917,85 @@ func AddAttachment(conn *sqlite.Conn, messageID Snowflake, attachment *Attachmen
 	attach_stmt.SetInt64("$type", int64(attachment.Type))
 	attach_stmt.SetText("$mimetype", attachment.MimeType)
 	attach_stmt.SetText("$filename", attachment.Filename)
-	attach_stmt.SetText("$path", GetAttachmentPath(attachment.ID, attachment.Filename))
+	attach_stmt.SetInt64("$size", int64(attachment.Size))
 
-	if _, err := ExecuteStatement(attach_stmt); err != nil {
-		return fmt.Errorf("failed to insert attachment: %w", err)
+	if _, err := tx.Execute(attach_stmt); err != nil {
+		tx.Finish(attach_stmt)
+		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to insert attachment: %w", err))
+	}
+
+	tx.Finish(attach_stmt)
+
+	if attachment.Preload != "" {
+		if err := tx.AddPreviews(attachment.ID, attachment.Width, attachment.Height, attachment.Preload); err != nil {
+			return NewError(ErrorCodeInternalError, fmt.Errorf("failed to insert attachment preview: %w", err))
+		}
 	}
 
 	return nil
 }
 
-func AddEmbed(conn *sqlite.Conn, messageID Snowflake, embed *Embed) error {
+func (tx *Transaction) GetAttachment(messageID Snowflake, attachmentID Snowflake, filename string) (Attachment, error) {
+	stmt := tx.Prepare(`
+		SELECT
+			a.id,
+			a.type,
+			a.mimetype,
+			a.filename,
+			p.width,
+			p.height,
+			p.preload
+		FROM
+			attachments a
+		LEFT JOIN
+			previews p ON a.id = p.id
+		WHERE
+			a.message_id = $message_id AND a.id = $attachment_id AND a.filename = $filename;`,
+	)
+	defer tx.Finish(stmt)
+
+	stmt.SetInt64("$message_id", int64(messageID))
+	stmt.SetInt64("$attachment_id", int64(attachmentID))
+	stmt.SetText("$filename", filename)
+
+	hasRow, err := stmt.Step()
+	if err != nil {
+		return Attachment{}, NewError(ErrorCodeInternalError, fmt.Errorf("failed to get attachment: %w", err))
+	}
+
+	if !hasRow {
+		return Attachment{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("attachment not found"))
+	}
+
+	attachment := Attachment{
+		ID:       Snowflake(stmt.GetInt64("id")),
+		Type:     int(stmt.GetInt64("type")),
+		MimeType: stmt.GetText("mimetype"),
+		Filename: stmt.GetText("filename"),
+	}
+
+	if !stmt.IsNull("width") {
+		attachment.Width = int(stmt.GetInt64("width"))
+	}
+	if !stmt.IsNull("height") {
+		attachment.Height = int(stmt.GetInt64("height"))
+	}
+	if !stmt.IsNull("preload") {
+		attachment.Preload = stmt.GetText("preload")
+	}
+
+	return attachment, nil
+}
+
+func (tx *Transaction) AddEmbed(messageID Snowflake, embed *Embed) error {
+	tx.MarkAsWrite()
 	// Assign a new ID to the embed if not already set
 	if embed.ID == 0 {
 		embed.ID = snowflake.New()
 	}
 
 	// Prepare the INSERT statement for the embeds table
-	embed_stmt := conn.Prep(`
+	embed_stmt := tx.Prepare(`
 	INSERT INTO embeds (
 		id,
 		message_id,
@@ -1041,7 +1045,6 @@ func AddEmbed(conn *sqlite.Conn, messageID Snowflake, embed *Embed) error {
 		$footer_icon_url,
 		$footer_icon_id
 	);`)
-	defer embed_stmt.Reset()
 
 	// Bind the embed values
 	embed_stmt.SetInt64("$id", int64(embed.ID))
@@ -1097,14 +1100,15 @@ func AddEmbed(conn *sqlite.Conn, messageID Snowflake, embed *Embed) error {
 	}
 
 	// Execute the embed insertion
-	_, err := embed_stmt.Step()
+	_, err := tx.Execute(embed_stmt)
+	tx.Finish(embed_stmt)
 	if err != nil {
-		return fmt.Errorf("failed to insert embed: %w", err)
+		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to insert embed: %w", err))
 	}
 
 	// Insert embed fields into the embed_fields table
 	for _, field := range embed.Fields {
-		field_stmt := conn.Prep(`
+		field_stmt := tx.Prepare(`
 		INSERT INTO embed_fields (
 			embed_id,
 			name,
@@ -1116,7 +1120,6 @@ func AddEmbed(conn *sqlite.Conn, messageID Snowflake, embed *Embed) error {
 			$value,
 			$inline
 		);`)
-		defer field_stmt.Reset()
 
 		field_stmt.SetInt64("$embed_id", int64(embed.ID))
 		field_stmt.SetText("$name", field.Name)
@@ -1127,41 +1130,65 @@ func AddEmbed(conn *sqlite.Conn, messageID Snowflake, embed *Embed) error {
 			field_stmt.SetInt64("$inline", 0)
 		}
 
-		_, err := field_stmt.Step()
+		_, err := tx.Execute(field_stmt)
+		tx.Finish(field_stmt)
+
 		if err != nil {
-			return fmt.Errorf("failed to insert embed field '%s': %w", field.Name, err)
+			return NewError(ErrorCodeInternalError, fmt.Errorf("failed to insert embed field '%s': %w", field.Name, err))
 		}
 	}
+
+	// Add previews for the embed if they exist
+	if embed.Image != nil {
+		if err := tx.AddPreviews(embed.Image.ID, embed.Image.Width, embed.Image.Height, embed.Image.Preload); err != nil {
+			return NewError(ErrorCodeInternalError, fmt.Errorf("failed to insert embed image preview: %w", err))
+		}
+	}
+
+	if embed.Thumbnail != nil {
+		if err := tx.AddPreviews(embed.Thumbnail.ID, embed.Thumbnail.Width, embed.Thumbnail.Height, embed.Thumbnail.Preload); err != nil {
+			return NewError(ErrorCodeInternalError, fmt.Errorf("failed to insert embed thumbnail preview: %w", err))
+		}
+	}
+
+	if embed.Video != nil {
+		fmt.Println("Adding embed video preview:", embed.Video.Width, embed.Video.Height, embed.Video.Preload)
+		if err := tx.AddPreviews(embed.Video.ID, embed.Video.Width, embed.Video.Height, embed.Video.Preload); err != nil {
+			return NewError(ErrorCodeInternalError, fmt.Errorf("failed to insert embed video preview: %w", err))
+		}
+	}
+
 	return nil
 }
 
-func DeleteEmbeds(conn *sqlite.Conn, embedIDs []Snowflake) error {
-	stmt := conn.Prep(`
+func (tx *Transaction) DeleteEmbeds(embedIDs []Snowflake) error {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`
 		DELETE FROM embeds
 		WHERE id = $id;`,
 	)
+	defer tx.Finish(stmt)
 
 	for _, embedID := range embedIDs {
 		stmt.SetInt64("$id", int64(embedID))
-		if _, err := ExecuteStatement(stmt); err != nil {
-			return fmt.Errorf("failed to delete embed %d: %w", embedID, err)
+		if _, err := tx.Execute(stmt); err != nil {
+			return NewError(ErrorCodeInternalError, fmt.Errorf("failed to delete embed %d: %w", embedID, err))
 		}
 	}
 
 	return nil
 }
 
-func AddMessage(conn *sqlite.Conn, message *Message) {
-	messages_stmt := conn.Prep("INSERT OR REPLACE INTO messages (id, type, channel_id, timestamp, author_id, content) VALUES ($id, $type, $channel_id, $timestamp, $author_id, $content);")
-
-	commit := sqlitex.Transaction(conn)
-	defer func() {
+func (tx *Transaction) AddMessage(message *Message) error {
+	tx.MarkAsWrite()
+	messages_stmt := tx.Prepare("INSERT OR REPLACE INTO messages (id, type, channel_id, timestamp, author_id, reference_id, content) VALUES ($id, $type, $channel_id, $timestamp, $author_id, $reference_id, $content);")
+	/*defer func() {
 		if r := recover(); r != nil {
 			var err error = r.(error)
 			commit(&err)
 			panic(r)
 		}
-	}()
+	}()*/
 
 	messages_stmt.SetInt64("$id", int64(message.ID))
 	messages_stmt.SetInt64("$type", int64(message.Type))
@@ -1170,283 +1197,247 @@ func AddMessage(conn *sqlite.Conn, message *Message) {
 	messages_stmt.SetInt64("$author_id", int64(message.AuthorID))
 	messages_stmt.SetText("$content", message.Content)
 
-	if _, err := ExecuteStatement(messages_stmt); err != nil {
-		commit(&err)
-		panic(err)
+	if message.ReferenceID != 0 {
+		messages_stmt.SetInt64("$reference_id", int64(message.ReferenceID))
+	} else {
+		messages_stmt.SetNull("$reference_id")
 	}
 
-	SetMessageMentions(conn, message.ID, message.MentionedUsers, message.MentionedRoles, message.MentionedChannels)
+	_, err := tx.Execute(messages_stmt)
+	tx.Finish(messages_stmt)
+
+	if err != nil {
+		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to insert message: %w", err))
+	}
+
+	tx.SetMessageMentions(message.ID, message.MentionedUsers, message.MentionedRoles, message.MentionedChannels)
 
 	for _, embed := range message.Embeds {
-		if err := AddEmbed(conn, message.ID, &embed); err != nil {
-			commit(&err)
-			panic(err)
+		if err := tx.AddEmbed(message.ID, &embed); err != nil {
+			return err
 		}
 	}
 
 	for _, attachment := range message.Attachments {
-		if err := AddAttachment(conn, message.ID, &attachment); err != nil {
-			commit(&err)
-			panic(err)
+		if err := tx.AddAttachment(message.ID, &attachment); err != nil {
+			return err
 		}
 	}
-
-	// Commit the transaction
-	var noError error = nil
-	commit(&noError)
-}
-
-func UpdateMessage(conn *sqlite.Conn, id Snowflake, content string, mentionedUsers []Snowflake, mentionedRoles []Snowflake, mentionedChannels []Snowflake, deletedEmbeds []Snowflake) error {
-	commit := sqlitex.Transaction(conn)
-
-	if err := DeleteEmbeds(conn, deletedEmbeds); err != nil {
-		commit(&err)
-		return fmt.Errorf("failed to delete embeds: %w", err)
-	}
-
-	if err := UpdateMessageContent(conn, id, content); err != nil {
-		commit(&err)
-		return fmt.Errorf("failed to update message content: %w", err)
-	}
-
-	if err := SetMessageMentions(conn, id, mentionedUsers, mentionedRoles, mentionedChannels); err != nil {
-		commit(&err)
-		return fmt.Errorf("failed to set message mentions: %w", err)
-	}
-
-	noError := error(nil)
-	commit(&noError)
 
 	return nil
 }
 
-func UpdateMessageContent(conn *sqlite.Conn, id Snowflake, content string) error {
-	stmt := conn.Prep(`
+func (tx *Transaction) UpdateMessage(id Snowflake, content string, mentionedUsers []Snowflake, mentionedRoles []Snowflake, mentionedChannels []Snowflake, deletedEmbeds []Snowflake) error {
+	tx.MarkAsWrite()
+	if err := tx.DeleteEmbeds(deletedEmbeds); err != nil {
+		return err
+	}
+
+	if err := tx.UpdateMessageContent(id, content); err != nil {
+		return err
+	}
+
+	if err := tx.SetMessageMentions(id, mentionedUsers, mentionedRoles, mentionedChannels); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (tx *Transaction) UpdateMessageContent(id Snowflake, content string) error {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`
 		UPDATE messages
 		SET content = $content, edited_timestamp = $edited_timestamp
 		WHERE id = $id;`,
 	)
+	defer tx.Finish(stmt)
 
 	stmt.SetText("$content", content)
 	stmt.SetInt64("$edited_timestamp", time.Now().UnixMilli())
 	stmt.SetInt64("$id", int64(id))
 
-	if _, err := ExecuteStatement(stmt); err != nil {
-		return fmt.Errorf("failed to update message: %w", err)
+	if _, err := tx.Execute(stmt); err != nil {
+		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to update message: %w", err))
 	}
 
 	return nil
 }
 
-func SetMessageMentions(conn *sqlite.Conn, id Snowflake, mentionedUsers []Snowflake, mentionedRoles []Snowflake, mentionedChannels []Snowflake) error {
-	user_delete_stmt := conn.Prep(`DELETE FROM message_user_mentions WHERE message_id = $message_id;`)
-	role_delete_stmt := conn.Prep(`DELETE FROM message_role_mentions WHERE message_id = $message_id;`)
-	channel_delete_stmt := conn.Prep(`DELETE FROM message_channel_mentions WHERE message_id = $message_id;`)
-
+func (tx *Transaction) SetMessageMentions(id Snowflake, mentionedUsers []Snowflake, mentionedRoles []Snowflake, mentionedChannels []Snowflake) error {
+	tx.MarkAsWrite()
+	user_delete_stmt := tx.Prepare(`DELETE FROM message_user_mentions WHERE message_id = $message_id;`)
 	user_delete_stmt.SetInt64("$message_id", int64(id))
+	_, err := tx.Execute(user_delete_stmt)
+	tx.Finish(user_delete_stmt)
+	if err != nil {
+		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to clear user mentions: %w", err))
+	}
+
+	role_delete_stmt := tx.Prepare(`DELETE FROM message_role_mentions WHERE message_id = $message_id;`)
 	role_delete_stmt.SetInt64("$message_id", int64(id))
+	_, err = tx.Execute(role_delete_stmt)
+	tx.Finish(role_delete_stmt)
+	if err != nil {
+		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to clear role mentions: %w", err))
+	}
+
+	channel_delete_stmt := tx.Prepare(`DELETE FROM message_channel_mentions WHERE message_id = $message_id;`)
 	channel_delete_stmt.SetInt64("$message_id", int64(id))
-
-	if _, err := ExecuteStatement(user_delete_stmt); err != nil {
-		return fmt.Errorf("failed to clear user mentions: %w", err)
+	_, err = tx.Execute(channel_delete_stmt)
+	tx.Finish(channel_delete_stmt)
+	if err != nil {
+		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to clear channel mentions: %w", err))
 	}
 
-	if _, err := ExecuteStatement(role_delete_stmt); err != nil {
-		return fmt.Errorf("failed to clear role mentions: %w", err)
-	}
-
-	if _, err := ExecuteStatement(channel_delete_stmt); err != nil {
-		return fmt.Errorf("failed to clear channel mentions: %w", err)
-	}
-
-	user_insert_stmt := conn.Prep("INSERT INTO message_user_mentions (message_id, user_id) VALUES ($message_id, $user_id);")
-	role_insert_stmt := conn.Prep("INSERT INTO message_role_mentions (message_id, role_id) VALUES ($message_id, $role_id);")
-	channel_insert_stmt := conn.Prep("INSERT INTO message_channel_mentions (message_id, channel_id) VALUES ($message_id, $channel_id);")
-
+	user_insert_stmt := tx.Prepare("INSERT INTO message_user_mentions (message_id, user_id) VALUES ($message_id, $user_id);")
 	for _, mentionedUserID := range mentionedUsers {
 		user_insert_stmt.SetInt64("$message_id", int64(id))
 		user_insert_stmt.SetInt64("$user_id", int64(mentionedUserID))
-		if _, err := ExecuteStatement(user_insert_stmt); err != nil {
-			return fmt.Errorf("failed to add user mention: %w", err)
+		_, err := tx.Execute(user_insert_stmt)
+		tx.Finish(user_insert_stmt)
+		if err != nil {
+			return NewError(ErrorCodeInternalError, fmt.Errorf("failed to add user mention: %w", err))
 		}
 	}
+	tx.Finish(user_insert_stmt)
 
+	role_insert_stmt := tx.Prepare("INSERT INTO message_role_mentions (message_id, role_id) VALUES ($message_id, $role_id);")
 	for _, mentionedRoleID := range mentionedRoles {
 		role_insert_stmt.SetInt64("$message_id", int64(id))
 		role_insert_stmt.SetInt64("$role_id", int64(mentionedRoleID))
-		if _, err := ExecuteStatement(role_insert_stmt); err != nil {
-			return fmt.Errorf("failed to add role mention: %w", err)
+		_, err := tx.Execute(role_insert_stmt)
+		tx.Finish(role_insert_stmt)
+		if err != nil {
+			return NewError(ErrorCodeInternalError, fmt.Errorf("failed to add role mention: %w", err))
 		}
 	}
+	tx.Finish(role_insert_stmt)
 
+	channel_insert_stmt := tx.Prepare("INSERT INTO message_channel_mentions (message_id, channel_id) VALUES ($message_id, $channel_id);")
 	for _, mentionedChannelID := range mentionedChannels {
 		channel_insert_stmt.SetInt64("$message_id", int64(id))
 		channel_insert_stmt.SetInt64("$channel_id", int64(mentionedChannelID))
-		if _, err := ExecuteStatement(channel_insert_stmt); err != nil {
-			return fmt.Errorf("failed to add channel mention: %w", err)
+		_, err := tx.Execute(channel_insert_stmt)
+		tx.Finish(channel_insert_stmt)
+		if err != nil {
+			return NewError(ErrorCodeInternalError, fmt.Errorf("failed to add channel mention: %w", err))
 		}
 	}
+	tx.Finish(channel_insert_stmt)
 
 	return nil
 }
 
-func DeleteMessage(conn *sqlite.Conn, id Snowflake) error {
-	stmt := conn.Prep(`
+func (tx *Transaction) DeleteMessage(id Snowflake) error {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`
 		DELETE FROM messages
 		WHERE id = $id;`,
 	)
+	defer tx.Finish(stmt)
 
 	stmt.SetInt64("$id", int64(id))
 
-	if _, err := ExecuteStatement(stmt); err != nil {
-		return fmt.Errorf("failed to delete message: %w", err)
+	if _, err := tx.Execute(stmt); err != nil {
+		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to delete message: %w", err))
 	}
 
 	return nil
 }
 
-func UploadAttachment(conn *sqlite.Conn, messageID Snowflake, filename string, input FileInputReader) {
-	commit := sqlitex.Transaction(conn)
-	path := GetAttachmentPath(messageID, filename)
-	err := AddFile(conn, path, input)
-	if err != nil {
-		commit(&err)
-		panic(err)
+func (tx *Transaction) AddReaction(messageID Snowflake, userID Snowflake, emojiID Snowflake) error {
+	tx.MarkAsWrite()
+	if !tx.ValidateEmoji(emojiID) {
+		return NewError(ErrorCodeInvalidRequest, fmt.Errorf("emoji not found"))
 	}
 
-	file, err := GetFile(conn, path)
-	if err != nil {
-		commit(&err)
-		panic(err)
-	}
-	defer file.Content.Close()
-
-	attach_stmt := conn.Prep(`
-		INSERT INTO attachments(id, message_id, type, mimetype, filename, path)
-		VALUES ($id, $message_id, $type, $mimetype, $filename, $path);`,
+	stmt := tx.Prepare(`
+		INSERT INTO reactions (message_id, user_id, emoji_id)
+		VALUES ($message_id, $user_id, $emoji_id);`,
 	)
+	defer tx.Finish(stmt)
 
-	id := snowflake.New()
-	typ := AttachmentTypeFile
+	stmt.SetInt64("$message_id", int64(messageID))
+	stmt.SetInt64("$user_id", int64(userID))
+	stmt.SetInt64("$emoji_id", int64(emojiID))
 
-	file.Content.Seek(0, io.SeekStart)
-	mime, _ := mimetype.DetectReader(file.Content)
-
-	mimeType := mime.String()
-
-	if slices.Contains(SupportedImageTypes, mimeType) {
-		typ = AttachmentTypeImage
-	}
-	if slices.Contains(SupportedVideoTypes, mimeType) {
-		typ = AttachmentTypeVideo
-	}
-	if mimeType == "" {
-		mimeType = "application/octet-stream"
+	if _, err := tx.Execute(stmt); err != nil {
+		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to add reaction: %w", err))
 	}
 
-	attach_stmt.SetInt64("$id", int64(id))
-	attach_stmt.SetInt64("$message_id", int64(messageID))
-	attach_stmt.SetInt64("$type", int64(typ))
-	attach_stmt.SetText("$mimetype", mimeType)
-	attach_stmt.SetText("$filename", filename)
-	attach_stmt.SetText("$path", path)
-	_, err = attach_stmt.Step()
-	if err != nil {
-		commit(&err)
-		panic(err)
-	}
-	var noError error = nil
-	commit(&noError)
-
-	if typ != AttachmentTypeFile {
-		file.Content.Seek(0, io.SeekStart)
-		previews, err := GetPreviews(file.Content, false)
-		if err != nil {
-			fmt.Println("Failed to generate previews:", err)
-			typ = AttachmentTypeFile
-		} else {
-			err = AddPreviews(conn, id, previews)
-			if err != nil {
-				panic(err)
-			}
-		}
-	}
+	return nil
 }
 
-func BuildAttachmentFromFile(conn *sqlite.Conn, id Snowflake, filename string) (*Attachment, error) {
-	file, err := GetFile(conn, GetAttachmentPath(id, filename))
-	if err != nil {
-		return nil, err
-	}
-	defer file.Content.Close()
-
-	file.Content.Seek(0, io.SeekStart)
-	mime, _ := mimetype.DetectReader(file.Content)
-
-	mimeType := mime.String()
-
-	typ := AttachmentTypeFile
-
-	if slices.Contains(SupportedImageTypes, mimeType) {
-		typ = AttachmentTypeImage
-	}
-	if slices.Contains(SupportedVideoTypes, mimeType) {
-		typ = AttachmentTypeVideo
-	}
-	if mimeType == "" {
-		mimeType = "application/octet-stream"
+func (tx *Transaction) DeleteReaction(messageID Snowflake, userID Snowflake, emojiID Snowflake) error {
+	tx.MarkAsWrite()
+	if !tx.ValidateEmoji(emojiID) {
+		return NewError(ErrorCodeInvalidRequest, fmt.Errorf("emoji not found"))
 	}
 
-	width, height := 0, 0
+	stmt := tx.Prepare(`
+		DELETE FROM reactions
+		WHERE message_id = $message_id AND user_id = $user_id AND emoji_id = $emoji_id;`,
+	)
+	defer tx.Finish(stmt)
 
-	if typ != AttachmentTypeFile {
-		file.Content.Seek(0, io.SeekStart)
-		previews, err := GetPreviews(file.Content, false)
-		if err != nil {
-			fmt.Println("Failed to generate previews:", err)
-			typ = AttachmentTypeFile
-		} else {
-			width = previews.Width
-			height = previews.Height
+	stmt.SetInt64("$message_id", int64(messageID))
+	stmt.SetInt64("$user_id", int64(userID))
+	stmt.SetInt64("$emoji_id", int64(emojiID))
 
-			err = AddPreviews(conn, id, previews)
-			if err != nil {
-				panic(err)
-			}
-		}
+	if _, err := tx.Execute(stmt); err != nil {
+		return fmt.Errorf("failed to delete reaction: %w", err)
 	}
 
-	attachment := &Attachment{
-		ID:       id,
-		Filename: filename,
-		Type:     typ,
-		MimeType: mimeType,
-		Size:     int(file.Size),
-		Width:    width,
-		Height:   height,
-	}
-
-	return attachment, nil
+	return nil
 }
 
-func IsURLAllowed(conn *sqlite.Conn, embedID Snowflake, requestedURL string) (bool, error) {
-	stmt := conn.Prep(`
+func (tx *Transaction) GetReactionCount(messageID Snowflake, emojiID Snowflake) (int, error) {
+	if !tx.ValidateEmoji(emojiID) {
+		return 0, NewError(ErrorCodeInvalidRequest, fmt.Errorf("emoji not found"))
+	}
+
+	stmt := tx.Prepare(`
+		SELECT COUNT(*) AS count
+		FROM reactions
+		WHERE message_id = $message_id AND emoji_id = $emoji_id;`,
+	)
+	defer tx.Finish(stmt)
+
+	stmt.SetInt64("$message_id", int64(messageID))
+	stmt.SetInt64("$emoji_id", int64(emojiID))
+
+	hasRow, err := stmt.Step()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get reaction count: %w", err)
+	}
+
+	if !hasRow {
+		return 0, nil
+	}
+
+	count := int(stmt.GetInt64("count"))
+	return count, nil
+}
+
+func (tx *Transaction) IsURLAllowed(embedID Snowflake, requestedURL string) (bool, error) {
+	stmt := tx.Prepare(`
 		SELECT
 			external_url
 		FROM
 			external_urls
 		WHERE
 			id = $embed_id;`)
-	defer stmt.Reset()
+	defer tx.Finish(stmt)
 
 	stmt.SetInt64("$embed_id", int64(embedID))
 
-	hasRow, err := stmt.Step()
+	found, err := tx.Execute(stmt)
+
 	if err != nil {
 		return false, fmt.Errorf("failed to execute query: %w", err)
 	}
 
-	if !hasRow {
+	if !found {
 		return false, ErrFileNotFound // Or a more specific error like ErrEmbedNotFound
 	}
 
@@ -1455,7 +1446,17 @@ func IsURLAllowed(conn *sqlite.Conn, embedID Snowflake, requestedURL string) (bo
 	return videoURL == requestedURL, nil
 }
 
-func GetPermissions(conn *sqlite.Conn, userID Snowflake, channelID Snowflake) int {
+func (tx *Transaction) GetPermissionsByMessage(userID Snowflake, messageID Snowflake) int {
+	channelID, err := tx.GetChannelByMessage(messageID)
+
+	if err != nil {
+		return 0
+	}
+
+	return tx.GetPermissionsByChannel(userID, channelID)
+}
+
+func (tx *Transaction) GetPermissionsByChannel(userID Snowflake, channelID Snowflake) int {
 	var allow int = 0
 	var deny int = 0
 
@@ -1463,26 +1464,24 @@ func GetPermissions(conn *sqlite.Conn, userID Snowflake, channelID Snowflake) in
 	var user User
 	var err error
 
-	commit := sqlitex.Transaction(conn)
-
-	if settings, err = GetSettings(conn); err != nil {
+	if settings, err = tx.GetSettings(); err != nil {
 		return 0
 	}
 
 	allow = settings.DefaultPermissions
 
-	if user, err = GetUser(conn, userID); err != nil {
+	if user, err = tx.GetUser(userID); err != nil {
 		return 0
 	}
 
 	for _, roleID := range user.Roles {
-		if role, err := GetRole(conn, roleID); err == nil {
+		if role, err := tx.GetRole(roleID); err == nil {
 			allow |= role.Permissions
 		}
 	}
 
 	if channelID != 0 {
-		if channel, err := GetChannel(conn, channelID); err == nil {
+		if channel, err := tx.GetChannel(channelID); err == nil {
 			for _, overwrite := range channel.Overwrites {
 				if overwrite.Type == OverwriteTypeRole {
 					for _, roleID := range user.Roles {
@@ -1501,9 +1500,6 @@ func GetPermissions(conn *sqlite.Conn, userID Snowflake, channelID Snowflake) in
 			}
 		}
 	}
-
-	var noError error = nil
-	commit(&noError)
 
 	permissions := allow & (^deny)
 

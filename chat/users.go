@@ -32,8 +32,11 @@ type UserIndex struct {
 }
 
 func (i *UserIndex) Populate(conn *sqlite.Conn) {
-	users := storage.GetAllUsers(conn)
-	roles := storage.GetAllRoles(conn)
+	tx := storage.NewTransaction(conn)
+	tx.Start()
+	users := tx.GetAllUsers()
+	roles := tx.GetAllRoles()
+	tx.Commit(nil)
 
 	for _, role := range roles {
 		i.Roles[role.ID] = role

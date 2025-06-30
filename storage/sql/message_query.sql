@@ -16,16 +16,14 @@ SELECT
                 'id', a.id,
                 'filename', a.filename,
                 'type', a.type,
-                'size', s.sz,
-                'preload', webp_base64(s2.data),
+                'size', a.size,
+                'preload', p.preload,
                 'width', p.width,
                 'height', p.height
             )
         )
         FROM attachments a
-        LEFT JOIN sqlar s ON a.path = s.name
         LEFT JOIN previews p ON a.id = p.id
-        LEFT JOIN sqlar s2 ON p.blur = s2.name
         WHERE a.message_id = m.id
     ) AS attachments,
     
@@ -49,7 +47,7 @@ SELECT
                         'url', e.image_url,
                         'width', img_p.width,
                         'height', img_p.height,
-                        'preload', webp_base64(img_s.data)
+                        'preload', img_p.preload
                     ) 
                 END,
                 
@@ -61,7 +59,7 @@ SELECT
                         'url', e.thumbnail_url,
                         'width', thumb_p.width,
                         'height', thumb_p.height,
-                        'preload', webp_base64(thumb_s.data)
+                        'preload', thumb_p.preload
                     )
                 END,
                 
@@ -73,7 +71,7 @@ SELECT
                         'url', e.video_url,
                         'width', vid_p.width,
                         'height', vid_p.height,
-                        'preload', webp_base64(vid_s.data)
+                        'preload', vid_p.preload
                     )
                 END,
                 
@@ -90,7 +88,7 @@ SELECT
                                 'url', e.author_icon_url,
                                 'width', author_icon_p.width,
                                 'height', author_icon_p.height,
-                                'preload', webp_base64(author_icon_s.data)
+                                'preload', author_icon_p.preload
                             )
                         END
                     )
@@ -117,7 +115,7 @@ SELECT
                                 'url', e.footer_icon_url,
                                 'width', footer_icon_p.width,
                                 'height', footer_icon_p.height,
-                                'preload', webp_base64(footer_icon_s.data)
+                                'preload', footer_icon_p.preload
                             )
                         END
                     )
@@ -139,15 +137,10 @@ SELECT
         )
         FROM embeds e
         LEFT JOIN previews img_p ON e.image_id = img_p.id
-        LEFT JOIN sqlar img_s ON img_p.blur = img_s.name
         LEFT JOIN previews thumb_p ON e.thumbnail_id = thumb_p.id
-        LEFT JOIN sqlar thumb_s ON thumb_p.blur = thumb_s.name
         LEFT JOIN previews vid_p ON e.video_id = vid_p.id
-        LEFT JOIN sqlar vid_s ON vid_p.blur = vid_s.name
         LEFT JOIN previews author_icon_p ON e.author_icon_id = author_icon_p.id
-        LEFT JOIN sqlar author_icon_s ON author_icon_p.blur = author_icon_s.name
         LEFT JOIN previews footer_icon_p ON e.footer_icon_id = footer_icon_p.id
-        LEFT JOIN sqlar footer_icon_s ON footer_icon_p.blur = footer_icon_s.name
         WHERE e.message_id = m.id
     ) AS embeds,
     
@@ -155,17 +148,28 @@ SELECT
     (
         SELECT json_group_array(
             json_object(
-                'emoji', r.emoji,
-                'emoji_id', r.emoji_id,
+                'emoji', sub.emoji_id,
+                'count', sub.reaction_count,
                 'users', (
-                    SELECT json_group_array(r2.user_id)
-                    FROM reactions r2
-                    WHERE r2.message_id = m.id AND r2.emoji = r.emoji
+                    SELECT json_group_array(user_id)
+                    FROM (
+                        SELECT user_id
+                        FROM reactions r2
+                        WHERE r2.message_id = m.id
+                            AND r2.emoji_id = sub.emoji_id
+                        LIMIT 5
+                    )
                 )
             )
         )
-        FROM reactions r
-        WHERE r.message_id = m.id
+        FROM (
+            SELECT
+                r.emoji_id AS emoji_id,
+                COUNT(*) AS reaction_count
+            FROM reactions r
+            WHERE r.message_id = m.id
+            GROUP BY r.emoji_id
+        ) AS sub
     ) AS reactions,
     
     -- Aggregate Mentions

@@ -29,9 +29,9 @@ const (
 	EventTypeMessageDeleteBulk = iota
 
 	EventTypeMessageReactionAdd         = iota
-	EventTypeMessageReactionRemove      = iota
-	EventTypeMessageReactionRemoveAll   = iota
-	EventTypeMessageReactionRemoveEmoji = iota
+	EventTypeMessageReactionDelete      = iota
+	EventTypeMessageReactionDeleteAll   = iota
+	EventTypeMessageReactionDeleteEmoji = iota
 
 	EventTypeChannelAdd        = iota
 	EventTypeChannelUpdate     = iota
@@ -43,7 +43,7 @@ const (
 	EventTypeRoleDelete = iota
 
 	EventTypeUserAdd    = iota
-	EventTypeUserRemove = iota
+	EventTypeUserDelete = iota
 	EventTypeUserUpdate = iota
 
 	EventTypeUserPresence = iota
@@ -103,11 +103,12 @@ type MessagesRequest struct {
 }
 
 type MessagesResponse struct {
-	ChannelID Snowflake `json:"channel"`
-	Before    Snowflake `json:"before,omitempty"`
-	After     Snowflake `json:"after,omitempty"`
-	Limit     int       `json:"limit"`
-	Messages  []Message `json:"messages"`
+	ChannelID  Snowflake `json:"channel"`
+	Before     Snowflake `json:"before,omitempty"`
+	After      Snowflake `json:"after,omitempty"`
+	Limit      int       `json:"limit"`
+	Messages   []Message `json:"messages"`
+	References []Message `json:"references,omitempty"`
 }
 
 type UsersRequest struct {
@@ -144,6 +145,7 @@ type UserListResponse struct {
 type MessageSendRequest struct {
 	ChannelID       Snowflake `json:"channel"`
 	Content         string    `json:"content"`
+	ReferenceID     Snowflake `json:"reference,omitempty"`
 	AttachmentCount int       `json:"attachmentCount"`
 }
 
@@ -164,8 +166,9 @@ type MessageUpdateRequest struct {
 	Content   string    `json:"content"`
 }
 type MessageAddEvent struct {
-	Message Message `json:"message"`
-	Author  User    `json:"author"`
+	Message   Message `json:"message"`
+	Reference Message `json:"reference,omitempty"`
+	Author    User    `json:"author"`
 }
 
 type MessageUpdateEvent struct {
@@ -174,6 +177,27 @@ type MessageUpdateEvent struct {
 
 type MessageDeleteEvent struct {
 	MessageID Snowflake `json:"message"`
+}
+
+type ReactionAddEvent struct {
+	MessageID Snowflake `json:"message"`
+	UserID    Snowflake `json:"user"`
+	EmojiID   Snowflake `json:"emoji"`
+}
+
+type ReactionDeleteEvent struct {
+	MessageID Snowflake `json:"message"`
+	UserID    Snowflake `json:"user"`
+	EmojiID   Snowflake `json:"emoji"`
+}
+
+type ReactionDeleteAllEvent struct {
+	MessageID Snowflake `json:"message"`
+}
+
+type ReactionDeleteEmojiEvent struct {
+	MessageID Snowflake `json:"message"`
+	EmojiID   Snowflake `json:"emoji"`
 }
 
 type LoginRequest struct {

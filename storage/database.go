@@ -4,7 +4,6 @@ import (
 	. "clack/common"
 	"context"
 	_ "embed"
-	"encoding/base64"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,11 +18,11 @@ var schema string
 
 var dbFile = filepath.Join(DataFolder, "database.db")
 var dbPool *sqlitemigration.Pool
-var dbWait sync.WaitGroup
+var dbPoolWait sync.WaitGroup
 var dbLog = NewLogger("DATABASE")
 
-func StartDatabase(ctx context.Context) *sync.WaitGroup {
-	dbWait.Add(1)
+func StartDatabase(ctx *ClackContext) {
+	ctx.Subsystems.Add(1)
 	dbLog.Println("Starting")
 
 	schema := sqlitemigration.Schema{
@@ -31,23 +30,18 @@ func StartDatabase(ctx context.Context) *sync.WaitGroup {
 	}
 
 	dbPool = sqlitemigration.NewPool(dbFile, schema, sqlitemigration.Options{
-		Flags: sqlite.OpenReadWrite | sqlite.OpenCreate,
+		Flags:    sqlite.OpenReadWrite | sqlite.OpenCreate,
+		PoolSize: 16,
 
 		PrepareConn: func(conn *sqlite.Conn) error {
-			err := conn.CreateFunction("webp_base64", &sqlite.FunctionImpl{
-				NArgs:         1,
-				Deterministic: true,
-				Scalar: func(ctx sqlite.Context, args []sqlite.Value) (sqlite.Value, error) {
-					str := "data:image/webp;base64, " + base64.StdEncoding.EncodeToString(args[0].Blob())
-					return sqlite.TextValue(str), nil
-				},
-			})
-			if err != nil {
-				dbLog.Panicln(err)
-			}
+			sqlitex.ExecuteTransient(conn, "PRAGMA journal_mode = WAL;", nil)
+			sqlitex.ExecuteTransient(conn, "PRAGMA synchronous = NORMAL;", nil)
+			sqlitex.ExecuteTransient(conn, "PRAGMA foreign_keys = ON;", nil)
+			sqlitex.ExecuteTransient(conn, "PRAGMA optimize;", nil)
 
-			return sqlitex.ExecuteTransient(conn, "PRAGMA foreign_keys = ON;", nil)
+			return nil
 		},
+
 		OnError: func(err error) {
 			dbLog.Panicln(err)
 		},
@@ -61,18 +55,42 @@ func StartDatabase(ctx context.Context) *sync.WaitGroup {
 
 	go func() {
 		<-ctx.Done()
-		dbPool.Close()
-		dbLog.Println("Finished")
-		dbWait.Done()
-	}()
 
-	return &dbWait
+		CloseDatabase()
+
+		dbLog.Println("Finished")
+		ctx.Subsystems.Done()
+	}()
 }
 
-func OpenDatabase(ctx context.Context) (*sqlite.Conn, error) {
+func CheckpointDatabase() {
+	pool, _ := sqlitex.NewPool(dbFile, sqlitex.PoolOptions{
+		Flags:    sqlite.OpenReadWrite | sqlite.OpenCreate,
+		PoolSize: 1})
+	conn, _ := pool.Take(context.TODO())
+	NewTransaction(conn).Checkpoint()
+	pool.Put(conn)
+	pool.Close()
+}
+
+func CloseDatabase() {
+	dbLog.Println("Waiting for connections to close")
+	dbPoolWait.Wait()
+	dbLog.Println("Closing connection pool")
+	dbPool.Close()
+	//dbLog.Println("Running checkpoint")
+	//CheckpointDatabase()
+}
+
+func OpenConnection(ctx context.Context) (*sqlite.Conn, error) {
+	dbPoolWait.Add(1)
 	return dbPool.Get(ctx)
 }
 
-func CloseDatabase(conn *sqlite.Conn) {
+func CloseConnection(conn *sqlite.Conn) {
+	if conn == nil {
+		return
+	}
 	dbPool.Put(conn)
+	dbPoolWait.Done()
 }
