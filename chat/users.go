@@ -5,6 +5,7 @@ import (
 	"clack/storage"
 	"slices"
 	"strings"
+	"sync"
 
 	"zombiezen.com/go/sqlite"
 )
@@ -25,10 +26,17 @@ func GetUserIndex(conn *sqlite.Conn) *UserIndex {
 }
 
 type UserIndex struct {
-	Users map[Snowflake]User
-	Roles map[Snowflake]Role
-
+	Users  map[Snowflake]User
+	Roles  map[Snowflake]Role
 	Groups []UserListGroup
+	Mutex  sync.Mutex
+}
+
+type UserListGroup struct {
+	ID    Snowflake   `json:"id"`
+	Count int         `json:"count"`
+	Start int         `json:"start"`
+	Users []Snowflake `json:"users"`
 }
 
 func (i *UserIndex) Populate(conn *sqlite.Conn) {
@@ -122,7 +130,9 @@ func (i *UserIndex) GetGroups() []UserListGroup {
 		}
 	}
 
+	i.Mutex.Lock()
 	i.Groups = response
+	i.Mutex.Unlock()
 
 	return response
 }
@@ -199,4 +209,17 @@ func (i *UserIndex) GetUserListSlice(req UserListRequest, limit int) UserListRes
 	}
 
 	return response
+}
+
+func (i *UserIndex) AddUser(user User) {
+	i.Mutex.Lock()
+	defer i.Mutex.Unlock()
+	if _, exists := i.Users[user.ID]; exists {
+		return
+	}
+
+	i.Users[user.ID] = user
+
+	// todo: update instead of rebuild
+	i.Groups = nil
 }

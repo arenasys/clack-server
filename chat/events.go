@@ -126,13 +126,6 @@ type UserListRequest struct {
 	EndIndex   int       `json:"endIndex"`
 }
 
-type UserListGroup struct {
-	ID    Snowflake   `json:"id"`
-	Count int         `json:"count"`
-	Start int         `json:"start"`
-	Users []Snowflake `json:"users"`
-}
-
 type UserListResponse struct {
 	StartGroup Snowflake `json:"startGroup"`
 	StartIndex int       `json:"startIndex"`
@@ -179,9 +172,18 @@ type MessageDeleteEvent struct {
 	MessageID Snowflake `json:"message"`
 }
 
+type ReactionAddRequest struct {
+	MessageID Snowflake `json:"message"`
+	EmojiID   Snowflake `json:"emoji"`
+}
 type ReactionAddEvent struct {
 	MessageID Snowflake `json:"message"`
 	UserID    Snowflake `json:"user"`
+	EmojiID   Snowflake `json:"emoji"`
+}
+
+type ReactionDeleteRequest struct {
+	MessageID Snowflake `json:"message"`
 	EmojiID   Snowflake `json:"emoji"`
 }
 

@@ -601,10 +601,10 @@ func (tx *Transaction) IsUsernameValid(username string) (bool, error) {
 	return true, nil
 }
 
-func (tx *Transaction) Register(username, password, email, inviteCode string) (Snowflake, string, error) {
+func (tx *Transaction) Register(username, password, email, inviteCode string) (User, string, error) {
 	tx.MarkAsWrite()
 	if _, err := tx.IsUsernameValid(username); err != nil {
-		return 0, "", err
+		return User{}, "", err
 	}
 
 	stmt := tx.Prepare(`
@@ -635,15 +635,20 @@ func (tx *Transaction) Register(username, password, email, inviteCode string) (S
 	}
 
 	if _, err := tx.Execute(stmt); err != nil {
-		return 0, "", NewError(ErrorCodeInternalError, err)
+		return User{}, "", NewError(ErrorCodeInternalError, err)
 	}
 
 	token, err := tx.AddToken(userID)
 	if err != nil {
-		return 0, "", err
+		return User{}, "", err
 	}
 
-	return userID, token, nil
+	user, err := tx.GetUser(userID)
+	if err != nil {
+		return User{}, "", NewError(ErrorCodeInternalError, fmt.Errorf("failed to retrieve user after registration: %w", err))
+	}
+
+	return user, token, nil
 }
 
 func (tx *Transaction) GetSettings() (Settings, error) {

@@ -17,6 +17,7 @@ SELECT
                 'filename', a.filename,
                 'type', a.type,
                 'size', a.size,
+                'mimetype', a.mimetype,
                 'preload', p.preload,
                 'width', p.width,
                 'height', p.height
@@ -157,7 +158,6 @@ SELECT
                         FROM reactions r2
                         WHERE r2.message_id = m.id
                             AND r2.emoji_id = sub.emoji_id
-                        LIMIT 5
                     )
                 )
             )
@@ -165,10 +165,12 @@ SELECT
         FROM (
             SELECT
                 r.emoji_id AS emoji_id,
-                COUNT(*) AS reaction_count
+                COUNT(*) AS reaction_count,
+                MIN(r.rowid) AS first_rowid
             FROM reactions r
             WHERE r.message_id = m.id
             GROUP BY r.emoji_id
+            ORDER BY first_rowid ASC
         ) AS sub
     ) AS reactions,
     

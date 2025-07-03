@@ -190,6 +190,7 @@ type Reaction struct {
 	EmojiID Snowflake   `json:"emoji" validate:"required"`
 	Count   int         `json:"count" validate:"required"`
 	Users   []Snowflake `json:"users",omitempty`
+	Me      bool        `json:"me,omitempty"`
 }
 
 const (

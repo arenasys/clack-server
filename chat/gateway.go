@@ -32,7 +32,7 @@ type PendingRequest struct {
 
 type Gateway struct {
 	connections      map[string]*GatewayConnection
-	connectionsMutex sync.Mutex
+	connectionsMutex sync.RWMutex
 
 	pending      map[Snowflake]*PendingRequest
 	pendingMutex sync.Mutex
@@ -51,8 +51,8 @@ func (gw *Gateway) RemoveConnection(conn *GatewayConnection) {
 }
 
 func (gw *Gateway) GetConnection(session string) *GatewayConnection {
-	gw.connectionsMutex.Lock()
-	defer gw.connectionsMutex.Unlock()
+	gw.connectionsMutex.RLock()
+	defer gw.connectionsMutex.RUnlock()
 	if conn, ok := gw.connections[session]; ok {
 		return conn
 	}
@@ -288,6 +288,9 @@ func (c *GatewayConnection) Process() {
 		case EventTypeMessageDelete:
 			c.HandleMessageDeleteRequest(msg, db)
 			break
+		case EventTypeMessageReactionAdd:
+			c.HandleMessageReactionAddRequest(msg, db)
+			break
 		default:
 			c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
 		}
@@ -413,7 +416,7 @@ func HandleGatewayUpload(ctx context.Context, slotID Snowflake, mr *multipart.Re
 
 func init() {
 	gw = &Gateway{
-		connectionsMutex: sync.Mutex{},
+		connectionsMutex: sync.RWMutex{},
 		connections:      make(map[string]*GatewayConnection),
 		pendingMutex:     sync.Mutex{},
 		pending:          make(map[Snowflake]*PendingRequest),

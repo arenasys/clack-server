@@ -135,7 +135,7 @@ func (c *GatewayConnection) HandleRegisterRequest(msg *UnknownEvent, db *sqlite.
 
 	fmt.Println("Registering user", req.Username, req.Password, req.Email, req.InviteCode)
 
-	userID, token, err := tx.Register(req.Username, req.Password, req.Email, req.InviteCode)
+	user, token, err := tx.Register(req.Username, req.Password, req.Email, req.InviteCode)
 	if err != nil {
 		tx.Commit(err)
 		c.HandleError(err)
@@ -144,9 +144,12 @@ func (c *GatewayConnection) HandleRegisterRequest(msg *UnknownEvent, db *sqlite.
 
 	tx.Commit(nil)
 
-	fmt.Println("Registered user", userID, token)
+	fmt.Println("Registered user", user.ID, token)
 
-	c.OnAuthentication(userID, token)
+	index := GetUserIndex(db)
+	index.AddUser(user)
+
+	c.OnAuthentication(user.ID, token)
 
 	c.Write(Event{
 		Type: EventTypeTokenResponse,
@@ -567,7 +570,7 @@ func (c *GatewayConnection) HandleMessageDeleteRequest(msg *UnknownEvent, db *sq
 }
 
 func (c *GatewayConnection) HandleMessageReactionAddRequest(msg *UnknownEvent, db *sqlite.Conn) {
-	var req ReactionAddEvent
+	var req ReactionAddRequest
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
 		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
 		return
@@ -582,6 +585,7 @@ func (c *GatewayConnection) HandleMessageReactionAddRequest(msg *UnknownEvent, d
 	if err != nil {
 		tx.Commit(err)
 		c.HandleError(err)
+		return
 	}
 
 	if count == 0 && permissions&PermissionAddReactions == 0 {
