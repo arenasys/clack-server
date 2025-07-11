@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -60,7 +59,7 @@ func attachmentHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	attch.Modified = time.Now()
+	//attch.Modified = time.Now()
 
 	w.Header().Set("Content-Type", attch.Mimetype)
 	w.Header().Set("Content-Disposition", "inline; filename="+attch.Name)
@@ -104,9 +103,10 @@ func previewHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	preview.Modified = time.Now()
+	//preview.Modified = time.Now()
 
 	w.Header().Set("Content-Type", preview.Mimetype)
+	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 
 	http.ServeContent(w, r, preview.Name, preview.Modified, preview.Content)
 

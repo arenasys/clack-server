@@ -50,9 +50,6 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create multipart reader", http.StatusBadRequest)
 	}
 
-	http.Error(w, "test", http.StatusBadRequest)
-	return
-
 	err = chat.HandleGatewayUpload(srvCtx, snowflake.Snowflake(slotID), reader)
 	if err != nil {
 		r.Body.Close()

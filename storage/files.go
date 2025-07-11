@@ -99,6 +99,10 @@ func UploadAttachment(messageID Snowflake, attachmentID Snowflake, filename stri
 	if typ != AttachmentTypeFile {
 		file.Seek(0, io.SeekStart)
 		previews, err = CreatePreviews(file, false)
+		if typ == AttachmentTypeImage && mimeType == "image/gif" {
+			file.Seek(0, io.SeekStart)
+			CreateAnimatedPreview(file, previews)
+		}
 		if err != nil {
 			fmt.Println("Failed to generate previews:", err)
 			typ = AttachmentTypeFile

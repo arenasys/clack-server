@@ -35,7 +35,7 @@ type Gateway struct {
 	connectionsMutex sync.RWMutex
 
 	pending      map[Snowflake]*PendingRequest
-	pendingMutex sync.Mutex
+	pendingMutex sync.RWMutex
 }
 
 func (gw *Gateway) AddConnection(conn *GatewayConnection) {
@@ -291,6 +291,9 @@ func (c *GatewayConnection) Process() {
 		case EventTypeMessageReactionAdd:
 			c.HandleMessageReactionAddRequest(msg, db)
 			break
+		case EventTypeMessageReactionDelete:
+			c.HandleMessageReactionDeleteRequest(msg, db)
+			break
 		default:
 			c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
 		}
@@ -418,7 +421,7 @@ func init() {
 	gw = &Gateway{
 		connectionsMutex: sync.RWMutex{},
 		connections:      make(map[string]*GatewayConnection),
-		pendingMutex:     sync.Mutex{},
+		pendingMutex:     sync.RWMutex{},
 		pending:          make(map[Snowflake]*PendingRequest),
 	}
 }

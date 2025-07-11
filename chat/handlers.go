@@ -614,7 +614,7 @@ func (c *GatewayConnection) HandleMessageReactionAddRequest(msg *UnknownEvent, d
 }
 
 func (c *GatewayConnection) HandleMessageReactionDeleteRequest(msg *UnknownEvent, db *sqlite.Conn) {
-	var req ReactionDeleteEvent
+	var req ReactionDeleteRequest
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
 		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
 		return
@@ -623,16 +623,6 @@ func (c *GatewayConnection) HandleMessageReactionDeleteRequest(msg *UnknownEvent
 	tx := storage.NewTransaction(db)
 	tx.Start()
 
-	if req.UserID != c.userID {
-		permissions := tx.GetPermissionsByMessage(c.userID, req.MessageID)
-		if permissions&PermissionManageMessages == 0 {
-			err := NewError(ErrorCodeNoPermission, nil)
-			tx.Commit(err)
-			c.HandleError(err)
-			return
-		}
-	}
-
 	if err := tx.DeleteReaction(req.MessageID, c.userID, req.EmojiID); err != nil {
 		tx.Commit(err)
 		c.HandleError(err)
@@ -640,6 +630,8 @@ func (c *GatewayConnection) HandleMessageReactionDeleteRequest(msg *UnknownEvent
 	}
 
 	tx.Commit(nil)
+
+	fmt.Println("Deleted reaction", req.MessageID, c.userID, req.EmojiID)
 
 	gw.Relay(Event{
 		Type: EventTypeMessageReactionDelete,

@@ -1390,7 +1390,7 @@ func (tx *Transaction) DeleteReaction(messageID Snowflake, userID Snowflake, emo
 	stmt.SetInt64("$emoji_id", int64(emojiID))
 
 	if _, err := tx.Execute(stmt); err != nil {
-		return fmt.Errorf("failed to delete reaction: %w", err)
+		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to delete reaction: %w", err))
 	}
 
 	return nil
@@ -1427,9 +1427,13 @@ func (tx *Transaction) GetReactionCount(messageID Snowflake, emojiID Snowflake) 
 func (tx *Transaction) IsURLAllowed(embedID Snowflake, requestedURL string) (bool, error) {
 	stmt := tx.Prepare(`
 		SELECT
-			external_url
+			image_url,
+			thumbnail_url,
+			video_url,
+			author_icon_url,
+			footer_icon_url
 		FROM
-			external_urls
+			embeds
 		WHERE
 			id = $embed_id;`)
 	defer tx.Finish(stmt)
@@ -1446,9 +1450,21 @@ func (tx *Transaction) IsURLAllowed(embedID Snowflake, requestedURL string) (boo
 		return false, ErrFileNotFound // Or a more specific error like ErrEmbedNotFound
 	}
 
-	videoURL := stmt.GetText("external_url")
+	imageURL := stmt.GetText("image_url")
+	thumbnailURL := stmt.GetText("thumbnail_url")
+	videoURL := stmt.GetText("video_url")
+	authorIconURL := stmt.GetText("author_icon_url")
+	footerIconURL := stmt.GetText("footer_icon_url")
 
-	return videoURL == requestedURL, nil
+	if (imageURL == requestedURL) ||
+		(thumbnailURL == requestedURL) ||
+		(videoURL == requestedURL) ||
+		(authorIconURL == requestedURL) ||
+		(footerIconURL == requestedURL) {
+		return true, nil
+	}
+
+	return false, nil
 }
 
 func (tx *Transaction) GetPermissionsByMessage(userID Snowflake, messageID Snowflake) int {

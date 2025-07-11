@@ -44,14 +44,7 @@ func GetOriginal(content io.Reader, useTemp bool) ([]byte, error) {
 	}
 }
 
-func CreatePreviews(content io.Reader, useTemp bool) (*Previews, error) {
-	original, err := GetOriginal(content, useTemp)
-	if err != nil {
-		return nil, fmt.Errorf("GetOriginal: %v", err)
-	}
-
-	var p Previews
-
+func GetDimensions(content io.Reader, p *Previews) error {
 	probeArgs := []string{
 		"-v", "error",
 		"-select_streams", "v:0",
@@ -60,14 +53,55 @@ func CreatePreviews(content io.Reader, useTemp bool) (*Previews, error) {
 		"-",
 	}
 
-	probeOutput, err := runFFprobeOnReader(probeArgs, bytes.NewReader(original))
+	probeOutput, err := runFFprobeOnReader(probeArgs, content)
 	if err != nil {
-		return nil, fmt.Errorf("ffprobe: %v", err)
+		return fmt.Errorf("ffprobe: %v", err)
 	}
 
-	_, err = fmt.Sscanf(probeOutput, "%d\n%d", &p.Width, &p.Height)
+	var width int
+	var height int
+
+	_, err = fmt.Sscanf(probeOutput, "%d\n%d", &width, &height)
 	if err != nil {
-		return nil, fmt.Errorf("parse dimensions: %v", err)
+		return fmt.Errorf("parse dimensions: %v", err)
+	}
+
+	p.Width = width
+	p.Height = height
+
+	return nil
+}
+
+func CreateAnimatedPreview(content io.ReadSeeker, p *Previews) error {
+	animatedArgs := []string{
+		"-i", "-",
+		"-c:v", "libwebp_anim",
+		"-loop", "0",
+		"-f", "image2pipe",
+		"-vf", "scale=w='min(iw,550)':h='min(ih,550)':force_original_aspect_ratio=increase",
+		"-",
+	}
+
+	animatedData, err := runFFmpegOnReader(animatedArgs, content)
+	if err != nil {
+		return fmt.Errorf("get animated preview: %v", err)
+	}
+
+	p.Display = animatedData
+	return nil
+}
+
+func CreatePreviews(content io.Reader, useTemp bool) (*Previews, error) {
+	original, err := GetOriginal(content, useTemp)
+	if err != nil {
+		return nil, fmt.Errorf("GetOriginal: %v", err)
+	}
+
+	var p Previews
+
+	err = GetDimensions(bytes.NewReader(original), &p)
+	if err != nil {
+		return nil, fmt.Errorf("get dimensions: %v", err)
 	}
 
 	commonArgs := []string{

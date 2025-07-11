@@ -157,11 +157,12 @@ type Embed struct {
 }
 
 type EmbedMedia struct {
-	ID      Snowflake `json:"id,omitempty"`
-	URL     string    `json:"url" validate:"required"`
-	Width   int       `json:"width" validate:"required"`
-	Height  int       `json:"height" validate:"required"`
-	Preload string    `json:"preload,omitempty"`
+	ID       Snowflake `json:"id,omitempty"`
+	URL      string    `json:"url" validate:"required"`
+	Width    int       `json:"width" validate:"required"`
+	Height   int       `json:"height" validate:"required"`
+	MimeType string    `json:"mimetype validate:"required"`
+	Preload  string    `json:"preload,omitempty"`
 }
 
 type EmbedFooter struct {
