@@ -294,6 +294,9 @@ func (c *GatewayConnection) Process() {
 		case EventTypeMessageReactionDelete:
 			c.HandleMessageReactionDeleteRequest(msg, db)
 			break
+		case EventTypeMessageReactionUsersRequest:
+			c.HandleMessageReactionUsersRequest(msg, db)
+			break
 		default:
 			c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
 		}

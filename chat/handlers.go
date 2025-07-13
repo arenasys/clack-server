@@ -643,6 +643,37 @@ func (c *GatewayConnection) HandleMessageReactionDeleteRequest(msg *UnknownEvent
 	})
 }
 
+func (c *GatewayConnection) HandleMessageReactionUsersRequest(msg *UnknownEvent, db *sqlite.Conn) {
+	var req ReactionUsersRequest
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	tx := storage.NewTransaction(db)
+	tx.Start()
+
+	fmt.Println("HandleMessageReactionUsersRequest", req.MessageID, req.EmojiID)
+
+	users, err := tx.GetReactionUsers(req.MessageID, req.EmojiID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	tx.Commit(nil)
+
+	c.Write(Event{
+		Type: EventTypeMessageReactionUsersResponse,
+		Data: ReactionUsersResponse{
+			MessageID: req.MessageID,
+			EmojiID:   req.EmojiID,
+			Users:     users,
+		},
+	})
+}
+
 func (c *GatewayConnection) TryEmbedURLs(id Snowflake, urls []string, db *sqlite.Conn) {
 	tx := storage.NewTransaction(db)
 	tx.Start()

@@ -1413,7 +1413,7 @@ func (tx *Transaction) GetReactionCount(messageID Snowflake, emojiID Snowflake) 
 
 	hasRow, err := stmt.Step()
 	if err != nil {
-		return 0, fmt.Errorf("failed to get reaction count: %w", err)
+		return 0, NewError(ErrorCodeInternalError, fmt.Errorf("failed to get reaction count: %w", err))
 	}
 
 	if !hasRow {
@@ -1422,6 +1422,33 @@ func (tx *Transaction) GetReactionCount(messageID Snowflake, emojiID Snowflake) 
 
 	count := int(stmt.GetInt64("count"))
 	return count, nil
+}
+
+func (tx *Transaction) GetReactionUsers(messageID Snowflake, emojiID Snowflake) ([]Snowflake, error) {
+	if !tx.ValidateEmoji(emojiID) {
+		return nil, NewError(ErrorCodeInvalidRequest, fmt.Errorf("emoji not found"))
+	}
+
+	stmt := tx.Prepare(`
+		SELECT user_id
+		FROM reactions
+		WHERE message_id = $message_id AND emoji_id = $emoji_id;`,
+	)
+	defer tx.Finish(stmt)
+
+	stmt.SetInt64("$message_id", int64(messageID))
+	stmt.SetInt64("$emoji_id", int64(emojiID))
+
+	users := []Snowflake{}
+
+	for hasRow, stepErr := stmt.Step(); hasRow; hasRow, stepErr = stmt.Step() {
+		if stepErr != nil {
+			return nil, NewError(ErrorCodeInternalError, fmt.Errorf("failed to get reaction users: %w", stepErr))
+		}
+		users = append(users, Snowflake(stmt.GetInt64("user_id")))
+	}
+
+	return users, nil
 }
 
 func (tx *Transaction) IsURLAllowed(embedID Snowflake, requestedURL string) (bool, error) {

@@ -33,6 +33,9 @@ const (
 	EventTypeMessageReactionDeleteAll   = iota
 	EventTypeMessageReactionDeleteEmoji = iota
 
+	EventTypeMessageReactionUsersRequest  = iota
+	EventTypeMessageReactionUsersResponse = iota
+
 	EventTypeChannelAdd        = iota
 	EventTypeChannelUpdate     = iota
 	EventTypeChannelDelete     = iota
@@ -200,6 +203,17 @@ type ReactionDeleteAllEvent struct {
 type ReactionDeleteEmojiEvent struct {
 	MessageID Snowflake `json:"message"`
 	EmojiID   Snowflake `json:"emoji"`
+}
+
+type ReactionUsersRequest struct {
+	MessageID Snowflake `json:"message"`
+	EmojiID   Snowflake `json:"emoji"`
+}
+
+type ReactionUsersResponse struct {
+	MessageID Snowflake   `json:"message"`
+	EmojiID   Snowflake   `json:"emoji"`
+	Users     []Snowflake `json:"users"`
 }
 
 type LoginRequest struct {
