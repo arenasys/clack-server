@@ -6,7 +6,6 @@ import (
 	"io"
 	"strings"
 
-	"clack/common/snowflake"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -24,10 +23,11 @@ var gwLog = NewLogger("GATEWAY")
 var gw *Gateway
 
 type PendingRequest struct {
-	slotID  Snowflake
-	message Message
-	seq     string
-	session string
+	slotID      Snowflake
+	requestType int
+	requestData interface{}
+	seq         string
+	session     string
 }
 
 type Gateway struct {
@@ -297,6 +297,9 @@ func (c *GatewayConnection) Process() {
 		case EventTypeMessageReactionUsersRequest:
 			c.HandleMessageReactionUsersRequest(msg, db)
 			break
+		case EventTypeUserUpdate:
+			c.HandleUserUpdateRequest(msg, db)
+			break
 		default:
 			c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
 		}
@@ -344,6 +347,67 @@ func HandleGatewayConnection(ctx context.Context, conn *websocket.Conn, token st
 
 	gwLog.Printf("Connection from %s closed", conn.RemoteAddr().String())
 }
+
+type UploadReader struct {
+	mr *multipart.Reader
+}
+
+func (u *UploadReader) ReadFiles(callback func(metadata string, reader FileInputReader) error) error {
+	var rawMetadata string
+
+	var metadata struct {
+		Filename string `json:"filename"`
+		Size     int64  `json:"size"`
+	}
+
+	for {
+		part, err := u.mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("reading multipart part: %v", err)
+		}
+
+		name := part.FormName()
+
+		if strings.HasPrefix(name, "metadata_") {
+			buf := new(strings.Builder)
+
+			if _, err := io.Copy(buf, part); err != nil {
+				part.Close()
+				return fmt.Errorf("reading metadata part %q: %v", name, err)
+			}
+			rawMetadata = buf.String()
+
+			if err := json.Unmarshal([]byte(rawMetadata), &metadata); err != nil {
+				part.Close()
+				return fmt.Errorf("parsing metadata part %q: %v", name, err)
+			}
+
+			part.Close()
+			continue
+		}
+
+		if strings.HasPrefix(name, "file_") {
+
+			reader := NewPartReader(part, metadata.Size)
+
+			err = callback(rawMetadata, reader)
+
+			if err != nil {
+				part.Close()
+				return fmt.Errorf("callback file %q: %v", metadata.Filename, err)
+			}
+
+			part.Close()
+			continue
+		}
+	}
+
+	return nil
+}
+
 func HandleGatewayUpload(ctx context.Context, slotID Snowflake, mr *multipart.Reader) error {
 	pending := gw.PopPendingRequest(slotID)
 	if pending == nil {
@@ -355,69 +419,20 @@ func HandleGatewayUpload(ctx context.Context, slotID Snowflake, mr *multipart.Re
 		return fmt.Errorf("invalid session")
 	}
 
-	db, _ := storage.OpenConnection(ctx)
-	defer storage.CloseConnection(db)
+	reader := UploadReader{mr: mr}
 
-	// Acknowledge the initial send response
-	messageID := snowflake.New()
-	pending.message.ID = messageID
-	conn.Write(Event{
-		Type: EventTypeMessageSendResponse,
-		Seq:  pending.seq,
-		Data: MessageSendResponse{
-			MessageID: messageID,
-		},
-	})
-
-	var metadata struct {
-		Filename  string `json:"filename"`
-		Spoilered bool   `json:"spoilered"`
-		Size      int64  `json:"size"`
+	switch pending.requestType {
+	case EventTypeMessageSendRequest:
+		conn.HandleMessageSendUpload(pending.requestData.(*Message), pending, &reader)
+		break
+	case EventTypeUserUpdate:
+		conn.HandleUserUpdateUpload(pending.requestData.(*UserUpdateRequest), pending, &reader)
+		break
+	default:
+		break
 	}
-
-	for {
-		part, err := mr.NextPart()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("reading multipart part: %v", err)
-		}
-
-		name := part.FormName()
-
-		if strings.HasPrefix(name, "metadata_") {
-			if err := json.NewDecoder(part).Decode(&metadata); err != nil {
-				part.Close()
-				return fmt.Errorf("invalid metadata %q: %v", name, err)
-			}
-			part.Close()
-			continue
-		}
-
-		if strings.HasPrefix(name, "file_") {
-			attachmentID := snowflake.New()
-
-			reader := NewPartReader(part, metadata.Size)
-
-			attachment, err := storage.UploadAttachment(messageID, attachmentID, metadata.Filename, reader)
-			if err != nil {
-				part.Close()
-				return fmt.Errorf("storing file %q: %v", metadata.Filename, err)
-			}
-
-			part.Close()
-
-			pending.message.Attachments = append(pending.message.Attachments, *attachment)
-			continue
-		}
-
-		part.Close()
-	}
-
-	// Finalize the send request with all collected attachments
-	conn.FinalizeMessageSendRequest(&pending.message, pending.seq, db)
 	return nil
+
 }
 
 func init() {

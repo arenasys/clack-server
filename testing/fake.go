@@ -10,12 +10,10 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/icrowley/fake"
 	"zombiezen.com/go/sqlite"
-	"zombiezen.com/go/sqlite/sqlitex"
 )
 
 func executeStatement(stmt *sqlite.Stmt) {
@@ -64,100 +62,99 @@ func PopulateDatabase(ctx context.Context) {
 
 	rng := rand.New(rand.NewSource(101))
 
-	roles := [3]Snowflake{
-		snowflake.New(),
-		snowflake.New(),
-		snowflake.New(),
+	roles := [3]Snowflake{0, 0, 0}
+
+	tx.Start()
+	roles[0], err = tx.AddRole("Admin", 0xa84300, 0, PermissionAdministrator, true, true)
+	if err != nil {
+		panic(err)
 	}
-	role := db.Prep("INSERT INTO roles (id, name, color, position, permissions, hoisted, mentionable) VALUES ($id, $name, $color, $position, $permissions, $hoisted, $mentionable);")
-
-	role.SetInt64("$id", int64(roles[0]))
-	role.SetText("$name", "Admin")
-	role.SetInt64("$color", 0xa84300)
-	role.SetInt64("$position", 0)
-	role.SetBool("$hoisted", true)
-	role.SetBool("$mentionable", true)
-	role.SetInt64("$permissions", PermissionAdministrator)
-	executeStatement(role)
-
-	role.SetInt64("$id", int64(roles[1]))
-	role.SetText("$name", "Moderator")
-	role.SetInt64("$color", 0xe67e22)
-	role.SetInt64("$position", 1)
-	role.SetBool("$hoisted", true)
-	role.SetBool("$mentionable", true)
-	role.SetInt64("$permissions", PermissionManageChannels|PermissionManageRoles|PermissionManageMessages)
-	executeStatement(role)
-
-	role.SetInt64("$id", int64(roles[2]))
-	role.SetText("$name", "Member")
-	role.SetInt64("$color", 0xf1c40f)
-	role.SetInt64("$position", 2)
-	executeStatement(role)
-
-	commit := sqlitex.Transaction(db)
-
-	user := db.Prep("INSERT INTO users (id, username, nickname, status, hash, salt) VALUES ($id, $username, $nickname, $status, $hash, $salt);")
-	user_role := db.Prep("INSERT INTO user_roles (user_id, role_id) VALUES ($user_id, $role_id);")
+	roles[1], err = tx.AddRole("Moderator", 0xe67e22, 1, PermissionManageChannels|PermissionManageRoles|PermissionManageMessages, true, true)
+	if err != nil {
+		panic(err)
+	}
+	roles[2], err = tx.AddRole("Member", 0xf1c40f, 2, PermissionDefault, false, false)
+	if err != nil {
+		panic(err)
+	}
+	tx.Commit(nil)
 
 	const userCount = 1000
 	users := [userCount]Snowflake{}
 
+	tx.Start()
 	for i := 0; i < userCount; i++ {
-		userID := snowflake.New()
-		users[i] = userID
-
 		var password = fake.SimplePassword()
+		var userName = fake.UserName() + GetRandom128()[:5]
+
+		for len(userName) < 3 || len(userName) > 32 {
+			userName = fake.UserName() + GetRandom128()[:5]
+		}
+
+		var displayName = fake.FullName()
+		var presence = rng.Int63n(3)
 		var salt = GetRandom128()
 		var hash = HashSha256(HashSha256(password, ""), salt)
+		var status = ""
+		if rng.Intn(5) == 0 {
+			status = fake.Sentence()
+		}
 
-		user.SetInt64("$id", int64(userID))
-		user.SetText("$username", fake.UserName()+GetRandom128()[:5])
-		user.SetText("$nickname", fake.FullName())
-		user.SetText("$hash", hash)
-		user.SetText("$salt", salt)
-		user.SetInt64("$status", rng.Int63n(3))
-		executeStatement(user)
+		var description = ""
+		if rng.Intn(2) == 0 {
+			description = fake.Paragraph()
+			if len(description) > 250 {
+				description = description[:250]
+			}
+		}
+
+		users[i], err = tx.AddUser(userName, hash, salt, "", "")
+		if err != nil {
+			fmt.Printf("Failed to add user %d: %v\n", i, err.Error())
+			panic(err)
+		}
+
+		err = tx.SetUserProfile(users[i], displayName, status, description, ProfileColorDefault, AvatarModifiedDefault)
+		if err != nil {
+			fmt.Printf("Failed to set profile messages for user %d: %v\n", i, err.Error())
+			panic(err)
+		}
+
+		err = tx.SetUserPresence(users[i], int(presence))
+		if err != nil {
+			fmt.Printf("Failed to set presence for user %d: %v\n", i, err.Error())
+			panic(err)
+		}
 
 		if i == 0 {
-			user_role.SetInt64("$user_id", int64(userID))
-			user_role.SetInt64("$role_id", int64(roles[0]))
-			executeStatement(user_role)
+			err = tx.AddRoleToUser(users[i], roles[0])
+			if err != nil {
+				panic(err)
+			}
 		} else if i <= 2 {
-			user_role.SetInt64("$user_id", int64(userID))
-			user_role.SetInt64("$role_id", int64(roles[1]))
-			executeStatement(user_role)
+			err = tx.AddRoleToUser(users[i], roles[1])
+			if err != nil {
+				panic(err)
+			}
 		} else {
-			user_role.SetInt64("$user_id", int64(userID))
-			user_role.SetInt64("$role_id", int64(roles[2]))
-			executeStatement(user_role)
+			err = tx.AddRoleToUser(users[i], roles[2])
+			if err != nil {
+				panic(err)
+			}
 		}
 
 		if i%1000 == 0 {
-			var noError error = nil
-			commit(&noError)
-			commit = sqlitex.Transaction(db)
+			tx.Commit(nil)
+			tx.Start()
 		}
 	}
 
-	var noError error = nil
-	commit(&noError)
+	tx.Commit(nil)
 
 	createMainUser(db, roles[2])
 
-	channel := db.Prep("INSERT INTO channels (id, type, name, description, position, parent_id) VALUES ($id, $type, $name, $description, $position, $parent_id);")
-
 	const channelCount = 8
 	channels := [channelCount]Snowflake{}
-
-	generalID := snowflake.New()
-	channel.SetInt64("$id", int64(generalID))
-	channel.SetInt64("$type", ChannelTypeCategory)
-	channel.SetText("$name", "General")
-	channel.SetText("$description", "")
-	channel.SetInt64("$position", 0)
-	channel.SetNull("$parent_id")
-	executeStatement(channel)
 
 	// Get all file in attachmentDir
 	attachmentDir := "../media/test"
@@ -185,27 +182,28 @@ func PopulateDatabase(ctx context.Context) {
 		"https://fxtwitter.com/JJ_Animation/status/1411179267342360576",
 	}
 
-	c := 0
+	tx.Start()
+	generalID, err := tx.AddChannel("General", ChannelTypeCategory, "", 0, 0)
+	if err != nil {
+		panic(err)
+	}
+
 	for i := 0; i < channelCount; i++ {
-		channelID := snowflake.New()
-		channels[i] = channelID
-		channel.SetInt64("$id", int64(channelID))
-		channel.SetInt64("$type", ChannelTypeText)
-		channel.SetText("$name", fake.Company())
-		channel.SetText("$description", "")
-		channel.SetInt64("$position", int64(i))
-		channel.SetInt64("$parent_id", int64(generalID))
-		executeStatement(channel)
+		channels[i], err = tx.AddChannel(fake.Company(), ChannelTypeText, "", i, generalID)
+		if err != nil {
+			panic(err)
+		}
+	}
+	tx.Commit(nil)
 
+	for i := 0; i < channelCount; i++ {
 		for k := 0; k < 200; k++ {
-
 			url := ""
 			if 199-k < len(URLs) && i == 0 {
 				url = URLs[199-k]
 			}
 
-			id := createMessage(db, channelID, users[:], roles[:], channels[:], url, rng)
-			c += 1
+			id := createMessage(db, channels[i], users[:], roles[:], channels[:], url, rng)
 
 			if 199-k < len(attachments) && i == 0 {
 				idx := 199 - k
@@ -218,96 +216,60 @@ func PopulateDatabase(ctx context.Context) {
 }
 
 func createMainUser(db *sqlite.Conn, role Snowflake) {
-	user := db.Prep("INSERT INTO users (id, username, nickname, status, hash, salt) VALUES ($id, $username, $nickname, $status, $hash, $salt);")
-
-	id := snowflake.New()
 	var password = "password"
 	var salt = GetRandom128()
 	var hash = HashSha256(HashSha256(password, ""), salt)
 
-	user.SetInt64("$id", int64(id))
-	user.SetText("$username", "user")
-	user.SetText("$nickname", "User")
-	user.SetText("$hash", hash)
-	user.SetText("$salt", salt)
-	user.SetInt64("$status", UserStatusOnline)
-	executeStatement(user)
+	tx := storage.NewTransaction(db)
+	tx.Start()
 
-	user_role := db.Prep("INSERT INTO user_roles (user_id, role_id) VALUES ($user_id, $role_id);")
-	user_role.SetInt64("$user_id", int64(id))
-	user_role.SetInt64("$role_id", int64(role))
-	executeStatement(user_role)
+	id, _ := tx.AddUser("user", hash, salt, "", "")
+	_ = tx.SetUserProfile(id, "User", "", "", ProfileColorDefault, AvatarModifiedDefault)
+	_ = tx.SetUserPresence(id, UserPresenceOnline)
+
+	tx.AddRoleToUser(id, role)
+
+	tx.Commit(nil)
 }
 
 func createMessage(db *sqlite.Conn, channelID Snowflake, users []Snowflake, roles []Snowflake, channels []Snowflake, url string, rng *rand.Rand) Snowflake {
-	message := db.Prep("INSERT INTO messages (id, type, channel_id, timestamp, author_id, content) VALUES ($id, $type, $channel_id, $timestamp, $author_id, $content);")
+	/*message := db.Prep("INSERT INTO messages (id, type, channel_id, timestamp, author_id, content) VALUES ($id, $type, $channel_id, $timestamp, $author_id, $content);")
 	messageUserMention := db.Prep("INSERT INTO message_user_mentions (message_id, user_id) VALUES ($message_id, $user_id);")
 	messageRoleMention := db.Prep("INSERT INTO message_role_mentions (message_id, role_id) VALUES ($message_id, $role_id);")
 	messageChannelMention := db.Prep("INSERT INTO message_channel_mentions (message_id, channel_id) VALUES ($message_id, $channel_id);")
-
-	messageID := snowflake.New()
+	*/
+	//messageID := snowflake.New()
 	userID := users[rng.Intn(len(users))] // random user
 	content := fake.Paragraph()           //fake.Sentence()
 
-	numExtras := 0 //1 + rng.Intn(4)
-	for i := 0; i < numExtras; i++ {
-		extraType := rng.Intn(5)
-		switch extraType {
-		case 0: // User mention
-			if len(users) > 0 {
-				mentionedUserID := users[rng.Intn(len(users))]
-				content += "\n\n<@" + strconv.FormatInt(int64(mentionedUserID), 10) + "> " + fake.Sentence()
-			}
-		case 1: // Role mention
-			if len(roles) > 0 {
-				mentionedRoleID := roles[rng.Intn(len(roles))]
-				content += "\n\n<@&" + strconv.FormatInt(int64(mentionedRoleID), 10) + "> " + fake.Sentence()
-			}
-		case 2: // Channel mention
-			if len(channels) > 0 {
-				mentionedChannelID := channels[rng.Intn(len(channels))]
-				content += "\n\n<#" + strconv.FormatInt(int64(mentionedChannelID), 10) + "> " + fake.Sentence()
-			}
-		case 3: // Code block
-			content += "\n\n```" + fake.Sentence() + "```"
-		case 4: // Code inline
-			content += "\n\n`" + fake.Sentence() + "`"
-		}
-	}
 	if url != "" {
 		content += "\n\n" + url
 	}
 
-	message.SetInt64("$id", int64(messageID))
-	message.SetInt64("$type", MessageTypeDefault)
-	message.SetInt64("$channel_id", int64(channelID))
-	message.SetInt64("$timestamp", time.Now().UnixMilli())
-	message.SetInt64("$author_id", int64(userID))
-	message.SetText("$content", content)
-	executeStatement(message)
+	var msg Message
+	msg.ID = snowflake.New()
+	msg.AuthorID = userID
+	msg.ChannelID = channelID
+	msg.Content = content
+	msg.Type = MessageTypeDefault
+	msg.Timestamp = int(time.Now().UnixMilli())
 
 	mentionedUsers, mentionedRoles, mentionedChannels, embeddableURLs := chat.ParseMessageContent(content)
+	msg.MentionedUsers = mentionedUsers
+	msg.MentionedRoles = mentionedRoles
+	msg.MentionedChannels = mentionedChannels
+	msg.EmbeddableURLs = embeddableURLs
 
-	for _, mentionedUserID := range mentionedUsers {
-		messageUserMention.SetInt64("$message_id", int64(messageID))
-		messageUserMention.SetInt64("$user_id", int64(mentionedUserID))
-		tryExecuteStatement(messageUserMention)
+	tx := storage.NewTransaction(db)
+	tx.Start()
+	err := tx.AddMessage(&msg)
+	if err != nil {
+		panic(err)
 	}
-
-	for _, mentionedRoleID := range mentionedRoles {
-		messageRoleMention.SetInt64("$message_id", int64(messageID))
-		messageRoleMention.SetInt64("$role_id", int64(mentionedRoleID))
-		tryExecuteStatement(messageRoleMention)
-	}
-
-	for _, mentionedChannelID := range mentionedChannels {
-		messageChannelMention.SetInt64("$message_id", int64(messageID))
-		messageChannelMention.SetInt64("$channel_id", int64(mentionedChannelID))
-		tryExecuteStatement(messageChannelMention)
-	}
+	tx.Commit(nil)
 
 	for _, embeddableURL := range embeddableURLs {
-		embed, err := chat.GetEmbedFromURL(context.Background(), messageID, embeddableURL)
+		embed, err := chat.GetEmbedFromURL(context.Background(), msg.ID, embeddableURL)
 		if err != nil {
 			fmt.Println(err)
 			continue
@@ -315,14 +277,14 @@ func createMessage(db *sqlite.Conn, channelID Snowflake, users []Snowflake, role
 
 		tx := storage.NewTransaction(db)
 		tx.Start()
-		err = tx.AddEmbed(messageID, embed)
+		err = tx.AddEmbed(msg.ID, embed)
 		if err != nil {
 			panic(err)
 		}
 		tx.Commit(err)
 	}
 
-	return messageID
+	return msg.ID
 }
 
 func createAttachment(db *sqlite.Conn, messageID Snowflake, path string) {

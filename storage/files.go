@@ -21,6 +21,10 @@ func GetPreviewPath(messageID Snowflake, previewID Snowflake, size string) strin
 	return fmt.Sprintf("previews/%d/%d/%s", messageID, previewID, size)
 }
 
+func GetAvatarPath(userID Snowflake, modified int64, size string) string {
+	return fmt.Sprintf("avatars/%d/%d/%s", userID, modified, size)
+}
+
 func WriteFile(path string, input FileInputReader) error {
 	file := filepath.Join(DataFolder, path)
 	os.MkdirAll(filepath.Dir(file), 0755)
@@ -153,6 +157,25 @@ func WritePreviews(messageID Snowflake, previewID Snowflake, previews *Previews)
 	return preload, nil
 }
 
+func UploadAvatar(userID Snowflake, modified int64, input FileInputReader) error {
+	avatar, err := CreateAvatar(input)
+	if err != nil {
+		return err
+	}
+
+	err = WriteFile(GetAvatarPath(userID, modified, "display"), bytes.NewReader(avatar.Display))
+	if err != nil {
+		return fmt.Errorf("failed to write display avatar: %w", err)
+	}
+
+	err = WriteFile(GetAvatarPath(userID, modified, "thumbnail"), bytes.NewReader(avatar.Thumb))
+	if err != nil {
+		return fmt.Errorf("failed to write thumb avatar: %w", err)
+	}
+
+	return nil
+}
+
 func GetFile(name string) (*File, error) {
 	disk, err := os.Open(filepath.Join(DataFolder, name))
 	if err == nil {
@@ -192,5 +215,17 @@ func GetAttachment(messageID Snowflake, attachment Attachment) (*File, error) {
 	}
 
 	file.Mimetype = attachment.MimeType
+	return file, nil
+}
+
+func GetAvatar(userID Snowflake, modified int64, typ string) (*File, error) {
+	name := GetAvatarPath(userID, modified, typ)
+	file, err := GetFile(name)
+
+	if err != nil {
+		return nil, err
+	}
+
+	file.Mimetype = "image/webp"
 	return file, nil
 }

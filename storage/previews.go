@@ -141,3 +141,37 @@ func CreatePreviews(content io.Reader, useTemp bool) (*Previews, error) {
 
 	return &p, nil
 }
+
+type Avatar struct {
+	Display []byte
+	Thumb   []byte
+}
+
+func CreateAvatar(content io.Reader) (*Avatar, error) {
+	var a Avatar
+	var err error
+
+	commonArgs := []string{
+		"-threads", "1",
+		"-i", "-",
+		"-vframes", "1",
+		"-quality", "100",
+		"-compression_level", "6",
+		"-c:v", "libwebp",
+		"-f", "image2pipe",
+	}
+
+	displayArgs := append(commonArgs, "-vf", "scale=256:256", "-")
+	a.Display, err = runFFmpegOnReader(displayArgs, content)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create display avatar: %w", err)
+	}
+
+	thumbArgs := append(commonArgs, "-vf", "scale=96:96", "-")
+	a.Thumb, err = runFFmpegOnReader(thumbArgs, bytes.NewReader(a.Display))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create thumb avatar: %w", err)
+	}
+
+	return &a, nil
+}

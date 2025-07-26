@@ -57,7 +57,7 @@ const (
 	EventTypeLogoutRequest   = iota
 	EventTypeRegisterRequest = iota
 
-	EventTypeUploadSlotResponse = iota
+	EventTypeUploadSlot = iota
 )
 
 type UnknownEvent struct {
@@ -149,7 +149,7 @@ type MessageSendResponse struct {
 	MessageID Snowflake `json:"message"`
 }
 
-type MessageUploadSlotResponse struct {
+type MessageUploadSlot struct {
 	SlotID Snowflake `json:"slot,omitempty"`
 }
 
@@ -234,4 +234,30 @@ type RegisterRequest struct {
 	Email           string `json:"email,omitempty"`
 	InviteCode      string `json:"inviteCode,omitempty"`
 	CaptchaResponse string `json:"captchaResponse,omitempty"`
+}
+
+type UserUpdateRequest struct {
+	UserID Snowflake `json:"user" validate:"required"`
+
+	DisplayName    string `json:"displayName,omitempty"`
+	StatusMessage  string `json:"statusMessage,omitempty"`
+	ProfileMessage string `json:"profileMessage,omitempty"`
+	ProfileColor   int    `json:"profileColor,omitempty"`
+	AvatarModified int    `json:"avatarModified,omitempty"`
+
+	SetName    bool `json:"setName" validate:"required"`
+	SetProfile bool `json:"setProfile" validate:"required"`
+	SetAvatar  bool `json:"setAvatar" validate:"required"`
+}
+
+type UserAddEvent struct {
+	User User `json:"user"`
+}
+
+type UserDeleteEvent struct {
+	UserID Snowflake `json:"user"`
+}
+
+type UserUpdateEvent struct {
+	User User `json:"user"`
 }

@@ -319,9 +319,6 @@ func (c *GatewayConnection) HandleUserListRequest(msg *UnknownEvent, db *sqlite.
 }
 
 func (c *GatewayConnection) HandleMessageSendRequest(msg *UnknownEvent, db *sqlite.Conn) {
-
-	fmt.Println("HandleMessageSendRequest")
-
 	var req MessageSendRequest
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
 		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
@@ -368,18 +365,19 @@ func (c *GatewayConnection) HandleMessageSendRequest(msg *UnknownEvent, db *sqli
 	if req.AttachmentCount > 0 {
 		slotID := snowflake.New()
 		pending := PendingRequest{
-			slotID:  slotID,
-			message: full,
-			seq:     msg.Seq,
-			session: c.session,
+			slotID:      slotID,
+			requestData: &full,
+			requestType: EventTypeMessageSendRequest,
+			seq:         msg.Seq,
+			session:     c.session,
 		}
 
 		gw.PushPendingRequest(&pending, slotID)
 
 		c.Write(Event{
-			Type: EventTypeMessageSendResponse,
+			Type: EventTypeUploadSlot,
 			Seq:  pending.seq,
-			Data: MessageUploadSlotResponse{
+			Data: MessageUploadSlot{
 				SlotID: slotID,
 			},
 		})
@@ -391,6 +389,46 @@ func (c *GatewayConnection) HandleMessageSendRequest(msg *UnknownEvent, db *sqli
 		}
 	}
 }
+
+func (c *GatewayConnection) HandleMessageSendUpload(message *Message, pending *PendingRequest, reader *UploadReader) {
+	db, _ := storage.OpenConnection(c.ctx)
+	defer storage.CloseConnection(db)
+
+	message.ID = snowflake.New()
+
+	err := reader.ReadFiles(func(metadata string, reader FileInputReader) error {
+		var parsed struct {
+			Filename  string `json:"filename"`
+			Size      int64  `json:"size"`
+			Spoilered bool   `json:"spoilered"`
+		}
+
+		if err := json.Unmarshal([]byte(metadata), &parsed); err != nil {
+			return err
+		}
+
+		attachmentID := snowflake.New()
+
+		attachment, err := storage.UploadAttachment(message.ID, attachmentID, parsed.Filename, reader)
+		if err != nil {
+			return err
+		}
+		message.Attachments = append(message.Attachments, *attachment)
+
+		return nil
+	})
+	if err != nil {
+		c.HandleError(err)
+		return
+	}
+
+	err = c.FinalizeMessageSendRequest(message, pending.seq, db)
+	if err != nil {
+		c.HandleError(err)
+		return
+	}
+}
+
 func (c *GatewayConnection) FinalizeMessageSendRequest(rawMessage *Message, seq string, db *sqlite.Conn) error {
 	tx := storage.NewTransaction(db)
 
@@ -500,7 +538,7 @@ func (c *GatewayConnection) HandleMessageUpdateRequest(msg *UnknownEvent, db *sq
 		}
 	}
 
-	if err := tx.UpdateMessage(req.MessageID, req.Content, mentionedUsers, mentionedRoles, mentionedChannels, deletedEmbeds); err != nil {
+	if err := tx.SetMessage(req.MessageID, req.Content, mentionedUsers, mentionedRoles, mentionedChannels, deletedEmbeds); err != nil {
 		tx.Commit(err)
 		c.HandleError(err)
 		return
@@ -631,8 +669,6 @@ func (c *GatewayConnection) HandleMessageReactionDeleteRequest(msg *UnknownEvent
 
 	tx.Commit(nil)
 
-	fmt.Println("Deleted reaction", req.MessageID, c.userID, req.EmojiID)
-
 	gw.Relay(Event{
 		Type: EventTypeMessageReactionDelete,
 		Data: ReactionDeleteEvent{
@@ -653,8 +689,6 @@ func (c *GatewayConnection) HandleMessageReactionUsersRequest(msg *UnknownEvent,
 	tx := storage.NewTransaction(db)
 	tx.Start()
 
-	fmt.Println("HandleMessageReactionUsersRequest", req.MessageID, req.EmojiID)
-
 	users, err := tx.GetReactionUsers(req.MessageID, req.EmojiID)
 	if err != nil {
 		tx.Commit(err)
@@ -670,6 +704,144 @@ func (c *GatewayConnection) HandleMessageReactionUsersRequest(msg *UnknownEvent,
 			MessageID: req.MessageID,
 			EmojiID:   req.EmojiID,
 			Users:     users,
+		},
+	})
+}
+
+func (c *GatewayConnection) HandleUserUpdateRequest(msg *UnknownEvent, db *sqlite.Conn) {
+	var req UserUpdateRequest
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	tx := storage.NewTransaction(db)
+	tx.Start()
+	user, err := tx.GetUser(req.UserID)
+	permissions, _ := tx.GetPermissionsByUser(c.userID)
+	tx.Commit(nil)
+
+	if err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	if user.ID == c.userID && permissions&PermissionChangeProfile == 0 {
+		err := NewError(ErrorCodeNoPermission, nil)
+		c.HandleError(err)
+		return
+	}
+
+	// Setting other peoples profile, narrow what is permitted (only reseting)
+	if user.ID != c.userID {
+		if permissions&PermissionManageProfiles == 0 {
+			err := NewError(ErrorCodeNoPermission, nil)
+			c.HandleError(err)
+			return
+		}
+
+		if permissions&PermissionAdministrator == 0 {
+			if req.SetAvatar && req.AvatarModified != AvatarModifiedDefault {
+				err := NewError(ErrorCodeNoPermission, nil)
+				c.HandleError(err)
+				return
+			}
+
+			if req.SetProfile {
+				statusAllowed := req.StatusMessage == "" || req.StatusMessage == user.StatusMessage
+				profileAllowed := req.ProfileMessage == "" || req.ProfileMessage == user.ProfileMessage
+				colorAllowed := req.ProfileColor == ProfileColorDefault || req.ProfileColor == user.ProfileColor
+				if !statusAllowed || !profileAllowed || !colorAllowed {
+					err := NewError(ErrorCodeNoPermission, nil)
+					tx.Commit(err)
+					c.HandleError(err)
+					return
+				}
+			}
+		}
+	}
+
+	if !req.SetName {
+		req.DisplayName = user.DisplayName
+	}
+
+	if !req.SetProfile {
+		req.StatusMessage = user.StatusMessage
+		req.ProfileMessage = user.ProfileMessage
+		req.ProfileColor = user.ProfileColor
+	}
+
+	if !req.SetAvatar {
+		req.AvatarModified = user.AvatarModified
+	}
+
+	if req.SetAvatar && req.AvatarModified != 0 {
+		// They want to upload an avatar, send an upload slot and pend for it
+		slotID := snowflake.New()
+		pending := PendingRequest{
+			slotID:      slotID,
+			requestData: &req,
+			requestType: EventTypeUserUpdate,
+			seq:         msg.Seq,
+			session:     c.session,
+		}
+
+		gw.PushPendingRequest(&pending, slotID)
+
+		c.Write(Event{
+			Type: EventTypeUploadSlot,
+			Seq:  pending.seq,
+			Data: MessageUploadSlot{
+				SlotID: slotID,
+			},
+		})
+	} else {
+		c.FinalizeUserUpdateRequest(&req, db)
+	}
+}
+
+func (c *GatewayConnection) HandleUserUpdateUpload(req *UserUpdateRequest, pending *PendingRequest, reader *UploadReader) {
+	db, _ := storage.OpenConnection(c.ctx)
+	defer storage.CloseConnection(db)
+
+	modified := time.Now().UnixMilli()
+	req.AvatarModified = int(modified)
+
+	err := reader.ReadFiles(func(_ string, reader FileInputReader) error {
+		storage.UploadAvatar(req.UserID, modified, reader)
+		return nil
+	})
+	if err != nil {
+		c.HandleError(err)
+	}
+
+	c.FinalizeUserUpdateRequest(req, db)
+}
+
+func (c *GatewayConnection) FinalizeUserUpdateRequest(req *UserUpdateRequest, db *sqlite.Conn) {
+	tx := storage.NewTransaction(db)
+	tx.Start()
+
+	err := tx.SetUserProfile(c.userID, req.DisplayName, req.StatusMessage, req.ProfileMessage, req.ProfileColor, req.AvatarModified)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	user, err := tx.GetUser(c.userID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	tx.Commit(nil)
+
+	gw.Relay(Event{
+		Type: EventTypeUserUpdate,
+		Data: UserUpdateEvent{
+			User: user,
 		},
 	})
 }

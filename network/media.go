@@ -88,7 +88,7 @@ func previewHandler(w http.ResponseWriter, r *http.Request) {
 
 	previewType := r.URL.Query().Get("type")
 	if previewType != "thumbnail" && previewType != "display" {
-		http.Error(w, "invalid preview type", http.StatusBadRequest)
+		http.Error(w, "invalid type", http.StatusBadRequest)
 		return
 	}
 
@@ -111,6 +111,45 @@ func previewHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, preview.Name, preview.Modified, preview.Content)
 
 	preview.Content.Close()
+}
+
+func avatarHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+
+	userIDInt64, err := strconv.ParseInt(vars["user_id"], 10, 64)
+	if err != nil {
+		http.Error(w, "invalid user id", http.StatusBadRequest)
+		return
+	}
+	userID := snowflake.Snowflake(userIDInt64)
+
+	modified, err := strconv.ParseInt(vars["modified"], 10, 64)
+	if err != nil {
+		http.Error(w, "invalid modified timestamp", http.StatusBadRequest)
+		return
+	}
+
+	avatarType := r.URL.Query().Get("type")
+	if avatarType != "thumbnail" && avatarType != "display" {
+		http.Error(w, "invalid type", http.StatusBadRequest)
+		return
+	}
+
+	avatar, err := storage.GetAvatar(userID, modified, avatarType)
+	if err != nil {
+		if errors.Is(err, storage.ErrFileNotFound) {
+			http.Error(w, "avatar not found", http.StatusNotFound)
+			return
+		}
+		srvLog.Printf("Failed to get avatar (User ID: %d, Modified: %d, Type: %s): %v", userID, modified, avatarType, err)
+		http.Error(w, "failed to get avatar", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", avatar.Mimetype)
+	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+
+	http.ServeContent(w, r, avatar.Name, avatar.Modified, avatar.Content)
 }
 
 func externalHandler(w http.ResponseWriter, r *http.Request) {
@@ -199,4 +238,5 @@ func buildMediaRouter(router *mux.Router) {
 	router.HandleFunc("/previews/{message_id}/{preview_id}", previewHandler)
 	router.HandleFunc("/attachments/{message_id}/{attachment_id}/{attachment_name}", attachmentHandler)
 	router.HandleFunc("/external/{message_id}/{embed_id}", externalHandler)
+	router.HandleFunc("/avatars/{user_id}/{modified}", avatarHandler)
 }

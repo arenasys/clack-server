@@ -78,22 +78,22 @@ func (i *UserIndex) GetGroups() []UserListGroup {
 		groupOrder = append(groupOrder, role.ID)
 	}
 
-	groupOrder = append(groupOrder, UserStatusOnline)
-	groups[UserStatusOnline] = []Snowflake{}
+	groupOrder = append(groupOrder, UserPresenceOnline)
+	groups[UserPresenceOnline] = []Snowflake{}
 
 	if len(i.Users) <= 1000 {
-		groupOrder = append(groupOrder, UserStatusOffline)
-		groups[UserStatusOffline] = []Snowflake{}
+		groupOrder = append(groupOrder, UserPresenceOffline)
+		groups[UserPresenceOffline] = []Snowflake{}
 	}
 
 	var userGroupPosition int
 	var userGroup Snowflake
 	for _, user := range i.Users {
 		userGroupPosition = 1 << 16
-		userGroup = UserStatusOffline
+		userGroup = UserPresenceOffline
 
 		if user.IsOnline() {
-			userGroup = UserStatusOnline
+			userGroup = UserPresenceOnline
 		}
 
 		for _, roleId := range user.Roles {
@@ -114,7 +114,7 @@ func (i *UserIndex) GetGroups() []UserListGroup {
 	for _, groupID := range groupOrder {
 		if users, ok := groups[groupID]; ok {
 			slices.SortFunc(users, func(a, b Snowflake) int {
-				return strings.Compare(i.Users[a].DisplayName(), i.Users[b].DisplayName())
+				return strings.Compare(i.Users[a].DisplayName, i.Users[b].DisplayName)
 			})
 
 			/*slices.SortFunc(users, func(a, b Snowflake) int {

@@ -8,29 +8,29 @@ type Snowflake = snowflake.Snowflake
 
 const SnowflakeNone Snowflake = 0
 
+const ProfileColorDefault = -1
+const AvatarModifiedDefault = 0
+
 const (
-	UserStatusOffline = iota
-	UserStatusOnline  = iota
-	UserStatusAway    = iota
+	UserPresenceOffline = iota
+	UserPresenceOnline  = iota
+	UserPresenceAway    = iota
 )
 
 type User struct {
-	ID       Snowflake   `json:"id" validate:"required"`
-	Username string      `json:"username" validate:"required"`
-	Nickname string      `json:"nickname,omitempty"`
-	Status   int         `json:"status" validate:"required"`
-	Roles    []Snowflake `json:"roles"`
+	ID             Snowflake   `json:"id" validate:"required"`
+	UserName       string      `json:"userName" validate:"required"`
+	DisplayName    string      `json:"displayName"`
+	StatusMessage  string      `json:"statusMessage,omitempty"`
+	ProfileMessage string      `json:"profileMessage,omitempty"`
+	ProfileColor   int         `json:"profileColor"`
+	AvatarModified int         `json:"avatarModified"`
+	Presence       int         `json:"presence" validate:"required"`
+	Roles          []Snowflake `json:"roles"`
 }
 
 func (u User) IsOnline() bool {
-	return u.Status != UserStatusOffline
-}
-
-func (u User) DisplayName() string {
-	if u.Nickname != "" {
-		return u.Nickname
-	}
-	return u.Username
+	return u.Presence != UserPresenceOffline
 }
 
 const (
@@ -45,23 +45,23 @@ const (
 	PermissionEmbedLinks      = 1 << iota
 	PermissionUploadFiles     = 1 << iota
 	PermissionMentionEveryone = 1 << iota
-	PermissionChangeNickname  = 1 << iota
+	PermissionChangeProfile   = 1 << iota
 
 	PermissionViewChannel        = 1 << iota
 	PermissionReadMessageHistory = 1 << iota
 
-	PermissionManageNicknames = 1 << iota
-	PermissionManageMessages  = 1 << iota
-	PermissionManageChannels  = 1 << iota
-	PermissionManageRoles     = 1 << iota
-	PermissionManageEmojis    = 1 << iota
+	PermissionManageProfiles = 1 << iota
+	PermissionManageMessages = 1 << iota
+	PermissionManageChannels = 1 << iota
+	PermissionManageRoles    = 1 << iota
+	PermissionManageEmojis   = 1 << iota
 )
 
 const PermissionDefault = PermissionSendMessages |
 	PermissionAddReactions |
 	PermissionEmbedLinks |
 	PermissionUploadFiles |
-	PermissionChangeNickname |
+	PermissionChangeProfile |
 	PermissionViewChannel |
 	PermissionReadMessageHistory
 
@@ -190,7 +190,7 @@ type EmbedField struct {
 type Reaction struct {
 	EmojiID Snowflake   `json:"emoji" validate:"required"`
 	Count   int         `json:"count" validate:"required"`
-	Users   []Snowflake `json:"users",omitempty`
+	Users   []Snowflake `json:"users"`
 	Me      bool        `json:"me,omitempty"`
 }
 

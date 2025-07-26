@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
 )
@@ -165,9 +167,13 @@ func (tx *Transaction) Checkpoint() {
 func (tx *Transaction) QueryUsers(id Snowflake) []User {
 	query := `SELECT
 			u.id,
-			u.username,
-			u.nickname,
-			u.status,
+			u.user_name,
+			u.display_name,
+			u.status_message,
+			u.profile_message,
+			u.profile_color,
+			u.avatar_modified,
+			u.presence,
 			r.role_id
 		FROM
 			users u
@@ -188,11 +194,15 @@ func (tx *Transaction) QueryUsers(id Snowflake) []User {
 	var currentUser *User = nil
 	for hasRow, _ := stmt.Step(); hasRow; hasRow, _ = stmt.Step() {
 		user := User{
-			ID:       Snowflake(stmt.GetInt64("id")),
-			Username: stmt.GetText("username"),
-			Nickname: stmt.GetText("nickname"),
-			Status:   int(stmt.GetInt64("status")),
-			Roles:    []Snowflake{},
+			ID:             Snowflake(stmt.GetInt64("id")),
+			UserName:       stmt.GetText("user_name"),
+			DisplayName:    stmt.GetText("display_name"),
+			StatusMessage:  stmt.GetText("status_message"),
+			ProfileMessage: stmt.GetText("profile_message"),
+			ProfileColor:   int(stmt.GetInt64("profile_color")),
+			AvatarModified: int(stmt.GetInt64("avatar_modified")),
+			Presence:       int(stmt.GetInt64("presence")),
+			Roles:          []Snowflake{},
 		}
 
 		if !stmt.IsNull("role_id") {
@@ -361,6 +371,35 @@ func (tx *Transaction) GetChannelByMessage(messageID Snowflake) (Snowflake, erro
 	return channel_id, nil
 }
 
+func (tx *Transaction) AddChannel(name string, channelType int, description string, position int, parentID Snowflake) (Snowflake, error) {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`
+		INSERT INTO channels(id, type, name, description, position, parent_id)
+		VALUES ($id, $type, $name, $description, $position, $parent_id);`,
+	)
+	defer tx.Finish(stmt)
+
+	channelID := snowflake.New()
+
+	stmt.SetInt64("$id", int64(channelID))
+	stmt.SetInt64("$type", int64(channelType))
+	stmt.SetText("$name", name)
+	stmt.SetText("$description", description)
+	stmt.SetInt64("$position", int64(position))
+
+	if parentID == 0 {
+		stmt.SetNull("$parent_id")
+	} else {
+		stmt.SetInt64("$parent_id", int64(parentID))
+	}
+
+	if _, err := tx.Execute(stmt); err != nil {
+		return 0, NewError(ErrorCodeInternalError, err)
+	}
+
+	return channelID, nil
+}
+
 func (tx *Transaction) QueryRoles(id Snowflake) []Role {
 	query := `SELECT
 			id,
@@ -411,6 +450,60 @@ func (tx *Transaction) GetAllRoles() []Role {
 	return tx.QueryRoles(0)
 }
 
+func (tx *Transaction) AddRole(name string, color int, position int, permissions int, hoisted bool, mentionable bool) (Snowflake, error) {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`
+		INSERT INTO roles(id, name, color, position, permissions, hoisted, mentionable)
+		VALUES ($id, $name, $color, $position, $permissions, $hoisted, $mentionable);`,
+	)
+	defer tx.Finish(stmt)
+
+	roleID := snowflake.New()
+
+	stmt.SetInt64("$id", int64(roleID))
+	stmt.SetText("$name", name)
+	stmt.SetInt64("$color", int64(color))
+	stmt.SetInt64("$position", int64(position))
+	stmt.SetInt64("$permissions", int64(permissions))
+	stmt.SetBool("$hoisted", hoisted)
+	stmt.SetBool("$mentionable", mentionable)
+
+	if _, err := tx.Execute(stmt); err != nil {
+		return 0, NewError(ErrorCodeInternalError, err)
+	}
+
+	return roleID, nil
+}
+
+func (tx *Transaction) AddRoleToUser(userID Snowflake, roleID Snowflake) error {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`INSERT INTO user_roles(user_id, role_id) VALUES ($user_id, $role_id);`)
+	defer tx.Finish(stmt)
+
+	stmt.SetInt64("$user_id", int64(userID))
+	stmt.SetInt64("$role_id", int64(roleID))
+
+	if _, err := tx.Execute(stmt); err != nil {
+		return NewError(ErrorCodeInternalError, err)
+	}
+
+	return nil
+}
+
+func (tx *Transaction) RemoveRoleFromUser(userID Snowflake, roleID Snowflake) error {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`DELETE FROM user_roles WHERE user_id = $user_id AND role_id = $role_id;`)
+	defer tx.Finish(stmt)
+
+	stmt.SetInt64("$user_id", int64(userID))
+	stmt.SetInt64("$role_id", int64(roleID))
+
+	if _, err := tx.Execute(stmt); err != nil {
+		return NewError(ErrorCodeInternalError, err)
+	}
+
+	return nil
+}
 func (tx *Transaction) QueryEmojis(id Snowflake) []Emoji {
 	query := `SELECT
 			name,
@@ -541,11 +634,11 @@ func (tx *Transaction) Login(username, password string) (Snowflake, string, erro
 		FROM
 			users
 		WHERE
-			username = $username`,
+			user_name = $user_name`,
 	)
 	defer tx.Finish(stmt)
 
-	stmt.SetText("$username", username)
+	stmt.SetText("$user_name", username)
 
 	hasRow, err := stmt.Step()
 	if err != nil {
@@ -573,20 +666,20 @@ func (tx *Transaction) Login(username, password string) (Snowflake, string, erro
 
 func (tx *Transaction) IsUsernameValid(username string) (bool, error) {
 	if username == "" || len(username) < 3 || len(username) > 32 {
-		return false, NewError(ErrorCodeInvalidUsername, nil)
+		return false, NewError(ErrorCodeInvalidUsername, fmt.Errorf("username '%s' must be between 3 and 32 characters long", username))
 	}
 
 	stmt := tx.Prepare(`
 		SELECT
-			username
+			user_name
 		FROM
 			users
 		WHERE
-			username = $username;`,
+			user_name = $user_name;`,
 	)
 	defer tx.Finish(stmt)
 
-	stmt.SetText("$username", username)
+	stmt.SetText("$user_name", username)
 
 	found, err := tx.Execute(stmt)
 
@@ -595,7 +688,7 @@ func (tx *Transaction) IsUsernameValid(username string) (bool, error) {
 	}
 
 	if found {
-		return false, NewError(ErrorCodeTakenUsername, nil)
+		return false, NewError(ErrorCodeTakenUsername, fmt.Errorf("username '%s' is already taken", username))
 	}
 
 	return true, nil
@@ -603,39 +696,19 @@ func (tx *Transaction) IsUsernameValid(username string) (bool, error) {
 
 func (tx *Transaction) Register(username, password, email, inviteCode string) (User, string, error) {
 	tx.MarkAsWrite()
-	if _, err := tx.IsUsernameValid(username); err != nil {
-		return User{}, "", err
-	}
 
-	stmt := tx.Prepare(`
-		INSERT INTO users(id, username, hash, salt, email, invite_code)
-		VALUES ($id, $username, $hash, $salt, $email, $invite_code);`,
-	)
-	defer tx.Finish(stmt)
-
-	userID := snowflake.New()
 	salt := GetRandom128()
 	hash := HashSha256(password, salt)
 
-	stmt.SetInt64("$id", int64(userID))
-	stmt.SetText("$username", username)
-	stmt.SetText("$hash", hash)
-	stmt.SetText("$salt", salt)
-
-	if email != "" {
-		stmt.SetText("$email", email)
-	} else {
-		stmt.SetNull("$email")
+	userID, err := tx.AddUser(username, hash, salt, inviteCode, email)
+	if err != nil {
+		return User{}, "", err
 	}
 
-	if inviteCode != "" {
-		stmt.SetText("$invite_code", inviteCode)
-	} else {
-		stmt.SetNull("$invite_code")
-	}
-
-	if _, err := tx.Execute(stmt); err != nil {
-		return User{}, "", NewError(ErrorCodeInternalError, err)
+	displayName := cases.Title(language.English, cases.NoLower).String(username)
+	err = tx.SetUserProfile(userID, displayName, "", "", ProfileColorDefault, AvatarModifiedDefault)
+	if err != nil {
+		return User{}, "", NewError(ErrorCodeInternalError, fmt.Errorf("failed to set user profile: %w", err))
 	}
 
 	token, err := tx.AddToken(userID)
@@ -649,6 +722,93 @@ func (tx *Transaction) Register(username, password, email, inviteCode string) (U
 	}
 
 	return user, token, nil
+}
+
+func (tx *Transaction) AddUser(userName, hash, salt, inviteCode, email string) (Snowflake, error) {
+	if _, err := tx.IsUsernameValid(userName); err != nil {
+		return 0, err
+	}
+
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`
+		INSERT INTO users(id, user_name, display_name, hash, salt, invite_code, email, presence)
+		VALUES ($id, $user_name, $display_name, $hash, $salt, $invite_code, $email, $presence);`,
+	)
+	defer tx.Finish(stmt)
+
+	userID := snowflake.New()
+	stmt.SetInt64("$id", int64(userID))
+	stmt.SetText("$user_name", userName)
+	stmt.SetText("$display_name", userName)
+	stmt.SetText("$hash", hash)
+	stmt.SetText("$salt", salt)
+	stmt.SetInt64("$presence", int64(UserPresenceOffline))
+
+	if inviteCode != "" {
+		stmt.SetText("$invite_code", inviteCode)
+	} else {
+		stmt.SetNull("$invite_code")
+	}
+
+	if email != "" {
+		stmt.SetText("$email", email)
+	} else {
+		stmt.SetNull("$email")
+	}
+
+	if _, err := tx.Execute(stmt); err != nil {
+		return 0, NewError(ErrorCodeInternalError, fmt.Errorf("failed to add user: %w", err))
+	}
+
+	return userID, nil
+}
+
+func (tx *Transaction) SetUserProfile(userID Snowflake, displayName, statusMessage, profileMessage string, profileColor, avatarModified int) error {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`
+		UPDATE users
+		SET
+			display_name = $display_name,
+			status_message = $status_message,
+			profile_message = $profile_message,
+			profile_color = $profile_color,
+			avatar_modified = $avatar_modified
+		WHERE id = $id;`,
+	)
+	defer tx.Finish(stmt)
+
+	stmt.SetInt64("$id", int64(userID))
+	stmt.SetText("$display_name", displayName)
+	stmt.SetText("$status_message", statusMessage)
+	stmt.SetText("$profile_message", profileMessage)
+	stmt.SetInt64("$profile_color", int64(profileColor))
+	stmt.SetInt64("$avatar_modified", int64(avatarModified))
+
+	if _, err := tx.Execute(stmt); err != nil {
+		return NewError(ErrorCodeInternalError, err)
+	}
+
+	return nil
+}
+
+func (tx *Transaction) SetUserPresence(userID Snowflake, presence int) error {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`
+		UPDATE users
+		SET
+			presence = $presence
+		WHERE id = $id;`,
+	)
+	defer tx.Finish(stmt)
+
+	stmt.SetInt64("$id", int64(userID))
+	stmt.SetInt64("$presence", int64(presence))
+
+	if _, err := tx.Execute(stmt); err != nil {
+		return NewError(ErrorCodeInternalError, err)
+	}
+
+	return nil
 }
 
 func (tx *Transaction) GetSettings() (Settings, error) {
@@ -1232,13 +1392,13 @@ func (tx *Transaction) AddMessage(message *Message) error {
 	return nil
 }
 
-func (tx *Transaction) UpdateMessage(id Snowflake, content string, mentionedUsers []Snowflake, mentionedRoles []Snowflake, mentionedChannels []Snowflake, deletedEmbeds []Snowflake) error {
+func (tx *Transaction) SetMessage(id Snowflake, content string, mentionedUsers []Snowflake, mentionedRoles []Snowflake, mentionedChannels []Snowflake, deletedEmbeds []Snowflake) error {
 	tx.MarkAsWrite()
 	if err := tx.DeleteEmbeds(deletedEmbeds); err != nil {
 		return err
 	}
 
-	if err := tx.UpdateMessageContent(id, content); err != nil {
+	if err := tx.SetMessageContent(id, content); err != nil {
 		return err
 	}
 
@@ -1248,7 +1408,7 @@ func (tx *Transaction) UpdateMessage(id Snowflake, content string, mentionedUser
 	return nil
 }
 
-func (tx *Transaction) UpdateMessageContent(id Snowflake, content string) error {
+func (tx *Transaction) SetMessageContent(id Snowflake, content string) error {
 	tx.MarkAsWrite()
 	stmt := tx.Prepare(`
 		UPDATE messages
@@ -1262,7 +1422,7 @@ func (tx *Transaction) UpdateMessageContent(id Snowflake, content string) error 
 	stmt.SetInt64("$id", int64(id))
 
 	if _, err := tx.Execute(stmt); err != nil {
-		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to update message: %w", err))
+		return NewError(ErrorCodeInternalError, fmt.Errorf("failed to set message: %w", err))
 	}
 
 	return nil
@@ -1494,6 +1654,34 @@ func (tx *Transaction) IsURLAllowed(embedID Snowflake, requestedURL string) (boo
 	return false, nil
 }
 
+func (tx *Transaction) GetPermissionsByUser(userID Snowflake) (int, *User) {
+	var allow int = 0
+	var settings Settings
+	var user User
+	var err error
+
+	if settings, err = tx.GetSettings(); err != nil {
+		return 0, nil
+	}
+
+	allow = settings.DefaultPermissions
+
+	if user, err = tx.GetUser(userID); err != nil {
+		return 0, &user
+	}
+
+	for _, roleID := range user.Roles {
+		if role, err := tx.GetRole(roleID); err == nil {
+			allow |= role.Permissions
+		}
+	}
+
+	if (allow & PermissionAdministrator) != 0 {
+		return PermissionAll, &user
+	}
+	return allow, &user
+}
+
 func (tx *Transaction) GetPermissionsByMessage(userID Snowflake, messageID Snowflake) int {
 	channelID, err := tx.GetChannelByMessage(messageID)
 
@@ -1507,26 +1695,9 @@ func (tx *Transaction) GetPermissionsByMessage(userID Snowflake, messageID Snowf
 func (tx *Transaction) GetPermissionsByChannel(userID Snowflake, channelID Snowflake) int {
 	var allow int = 0
 	var deny int = 0
+	var user *User
 
-	var settings Settings
-	var user User
-	var err error
-
-	if settings, err = tx.GetSettings(); err != nil {
-		return 0
-	}
-
-	allow = settings.DefaultPermissions
-
-	if user, err = tx.GetUser(userID); err != nil {
-		return 0
-	}
-
-	for _, roleID := range user.Roles {
-		if role, err := tx.GetRole(roleID); err == nil {
-			allow |= role.Permissions
-		}
-	}
+	allow, user = tx.GetPermissionsByUser(userID)
 
 	if channelID != 0 {
 		if channel, err := tx.GetChannel(channelID); err == nil {
