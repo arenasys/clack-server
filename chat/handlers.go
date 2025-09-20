@@ -838,6 +838,10 @@ func (c *GatewayConnection) FinalizeUserUpdateRequest(req *UserUpdateRequest, db
 
 	tx.Commit(nil)
 
+	// Update in-memory index and invalidate groups if needed
+	index := GetUserIndex(db)
+	index.UpdateUser(user)
+
 	gw.Relay(Event{
 		Type: EventTypeUserUpdate,
 		Data: UserUpdateEvent{
@@ -879,5 +883,131 @@ func (c *GatewayConnection) TryEmbedURLs(id Snowflake, urls []string, db *sqlite
 		Data: MessageUpdateEvent{
 			Message: message,
 		},
+	})
+}
+
+// Role Management Handlers
+func (c *GatewayConnection) HandleRoleAddRequest(msg *UnknownEvent, db *sqlite.Conn) {
+	var req RoleAddRequest
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	tx := storage.NewTransaction(db)
+	tx.Start()
+	perms, _ := tx.GetPermissionsByUser(c.userID)
+	if perms&PermissionManageRoles == 0 {
+		tx.Commit(nil)
+		c.HandleError(NewError(ErrorCodeNoPermission, nil))
+		return
+	}
+
+	roleID, err := tx.AddRole(req.Name, req.Color, req.Position, req.Permissions, req.Hoisted, req.Mentionable)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	role, err := tx.GetRole(roleID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	tx.Commit(nil)
+
+	// Update index cache
+	index := GetUserIndex(db)
+	index.Mutex.Lock()
+	index.Roles[role.ID] = role
+	index.Mutex.Unlock()
+	index.InvalidateGroups()
+
+	gw.Relay(Event{
+		Type: EventTypeRoleAdd,
+		Data: RoleAddEvent{Role: role},
+	})
+}
+
+func (c *GatewayConnection) HandleRoleUpdateRequest(msg *UnknownEvent, db *sqlite.Conn) {
+	var req RoleUpdateRequest
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	tx := storage.NewTransaction(db)
+	tx.Start()
+	perms, _ := tx.GetPermissionsByUser(c.userID)
+	if perms&PermissionManageRoles == 0 {
+		tx.Commit(nil)
+		c.HandleError(NewError(ErrorCodeNoPermission, nil))
+		return
+	}
+
+	role := req.Role
+	if err := tx.UpdateRole(role.ID, role.Name, role.Color, role.Position, role.Permissions, role.Hoisted, role.Mentionable); err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	role, err := tx.GetRole(role.ID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	tx.Commit(nil)
+
+	index := GetUserIndex(db)
+	index.Mutex.Lock()
+	index.Roles[role.ID] = role
+	index.Mutex.Unlock()
+	index.InvalidateGroups()
+
+	gw.Relay(Event{
+		Type: EventTypeRoleUpdate,
+		Data: RoleUpdateEvent{Role: role},
+	})
+}
+
+func (c *GatewayConnection) HandleRoleDeleteRequest(msg *UnknownEvent, db *sqlite.Conn) {
+	var req RoleDeleteRequest
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	tx := storage.NewTransaction(db)
+	tx.Start()
+	perms, _ := tx.GetPermissionsByUser(c.userID)
+	if perms&PermissionManageRoles == 0 {
+		tx.Commit(nil)
+		c.HandleError(NewError(ErrorCodeNoPermission, nil))
+		return
+	}
+
+	if err := tx.DeleteRole(req.RoleID); err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	tx.Commit(nil)
+
+	index := GetUserIndex(db)
+	index.Mutex.Lock()
+	delete(index.Roles, req.RoleID)
+	index.Mutex.Unlock()
+	index.InvalidateGroups()
+
+	gw.Relay(Event{
+		Type: EventTypeRoleDelete,
+		Data: RoleDeleteEvent{RoleID: req.RoleID},
 	})
 }

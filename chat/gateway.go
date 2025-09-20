@@ -297,10 +297,19 @@ func (c *GatewayConnection) Process() {
 		case EventTypeMessageReactionUsersRequest:
 			c.HandleMessageReactionUsersRequest(msg, db)
 			break
-		case EventTypeUserUpdate:
-			c.HandleUserUpdateRequest(msg, db)
-			break
-		default:
+	case EventTypeUserUpdate:
+		c.HandleUserUpdateRequest(msg, db)
+		break
+	case EventTypeRoleAdd:
+		c.HandleRoleAddRequest(msg, db)
+		break
+	case EventTypeRoleUpdate:
+		c.HandleRoleUpdateRequest(msg, db)
+		break
+	case EventTypeRoleDelete:
+		c.HandleRoleDeleteRequest(msg, db)
+		break
+	default:
 			c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
 		}
 	}

@@ -11,17 +11,18 @@ import (
 )
 
 var (
-	userIndex *UserIndex
+	userIndex     *UserIndex
+	userIndexOnce sync.Once
 )
 
 func GetUserIndex(conn *sqlite.Conn) *UserIndex {
-	if userIndex == nil {
+	userIndexOnce.Do(func() {
 		userIndex = &UserIndex{
 			Users: map[Snowflake]User{},
 			Roles: map[Snowflake]Role{},
 		}
 		userIndex.Populate(conn)
-	}
+	})
 	return userIndex
 }
 
@@ -29,7 +30,7 @@ type UserIndex struct {
 	Users  map[Snowflake]User
 	Roles  map[Snowflake]Role
 	Groups []UserListGroup
-	Mutex  sync.Mutex
+	Mutex  sync.RWMutex
 }
 
 type UserListGroup struct {
@@ -46,6 +47,9 @@ func (i *UserIndex) Populate(conn *sqlite.Conn) {
 	roles := tx.GetAllRoles()
 	tx.Commit(nil)
 
+	i.Mutex.Lock()
+	defer i.Mutex.Unlock()
+
 	for _, role := range roles {
 		i.Roles[role.ID] = role
 	}
@@ -56,10 +60,17 @@ func (i *UserIndex) Populate(conn *sqlite.Conn) {
 }
 
 func (i *UserIndex) GetGroups() []UserListGroup {
+	// Fast path: if cached, return it
+	i.Mutex.RLock()
 	if i.Groups != nil {
-		return i.Groups
+		cached := i.Groups
+		i.Mutex.RUnlock()
+		return cached
 	}
+	i.Mutex.RUnlock()
 
+	// Build groups using a read lock to protect Users/Roles reads
+	i.Mutex.RLock()
 	groups := map[Snowflake][]Snowflake{}
 	groupOrder := []Snowflake{}
 
@@ -110,16 +121,19 @@ func (i *UserIndex) GetGroups() []UserListGroup {
 		}
 	}
 
+	// We no longer need to read maps; release read lock before sorting/name lookups
+	i.Mutex.RUnlock()
+
+	// Sort and assemble response
 	var response []UserListGroup
 	for _, groupID := range groupOrder {
 		if users, ok := groups[groupID]; ok {
+			// For name sorting, we need access to i.Users; take a read lock briefly
+			i.Mutex.RLock()
 			slices.SortFunc(users, func(a, b Snowflake) int {
 				return strings.Compare(i.Users[a].DisplayName, i.Users[b].DisplayName)
 			})
-
-			/*slices.SortFunc(users, func(a, b Snowflake) int {
-				return int(a - b)
-			})*/
+			i.Mutex.RUnlock()
 
 			response = append(response, UserListGroup{
 				ID:    groupID,
@@ -130,6 +144,7 @@ func (i *UserIndex) GetGroups() []UserListGroup {
 		}
 	}
 
+	// Cache the result
 	i.Mutex.Lock()
 	i.Groups = response
 	i.Mutex.Unlock()
@@ -138,16 +153,22 @@ func (i *UserIndex) GetGroups() []UserListGroup {
 }
 
 func (i *UserIndex) GetUser(id Snowflake) (User, bool) {
+	i.Mutex.RLock()
+	defer i.Mutex.RUnlock()
 	user, ok := i.Users[id]
 	return user, ok
 }
 
 func (i *UserIndex) GetRole(id Snowflake) (Role, bool) {
+	i.Mutex.RLock()
+	defer i.Mutex.RUnlock()
 	role, ok := i.Roles[id]
 	return role, ok
 }
 
 func (i *UserIndex) GetAllRoles() []Role {
+	i.Mutex.RLock()
+	defer i.Mutex.RUnlock()
 	var roles []Role
 	for _, role := range i.Roles {
 		roles = append(roles, role)
@@ -156,6 +177,8 @@ func (i *UserIndex) GetAllRoles() []Role {
 }
 
 func (i *UserIndex) GetUsers(ids []Snowflake) []User {
+	i.Mutex.RLock()
+	defer i.Mutex.RUnlock()
 	var users []User
 	for _, id := range ids {
 		if user, ok := i.Users[id]; ok {
@@ -221,5 +244,20 @@ func (i *UserIndex) AddUser(user User) {
 	i.Users[user.ID] = user
 
 	// todo: update instead of rebuild
+	i.Groups = nil
+}
+
+func (i *UserIndex) UpdateUser(user User) {
+	i.Mutex.Lock()
+	defer i.Mutex.Unlock()
+
+	i.Users[user.ID] = user
+	i.Groups = nil
+}
+
+func (i *UserIndex) InvalidateGroups() {
+	i.Mutex.Lock()
+	defer i.Mutex.Unlock()
+
 	i.Groups = nil
 }

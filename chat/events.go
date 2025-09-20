@@ -261,3 +261,32 @@ type UserDeleteEvent struct {
 type UserUpdateEvent struct {
 	User User `json:"user"`
 }
+
+type RoleAddRequest struct {
+	Name        string `json:"name" validate:"required"`
+	Color       int    `json:"color" validate:"required"`
+	Position    int    `json:"position" validate:"required"`
+	Permissions int    `json:"permissions" validate:"required"`
+	Hoisted     bool   `json:"hoisted" validate:"required"`
+	Mentionable bool   `json:"mentionable" validate:"required"`
+}
+
+type RoleUpdateRequest struct {
+	Role Role `json:"role" validate:"required"`
+}
+
+type RoleDeleteRequest struct {
+	RoleID Snowflake `json:"role" validate:"required"`
+}
+
+type RoleAddEvent struct {
+	Role Role `json:"role"`
+}
+
+type RoleUpdateEvent struct {
+	Role Role `json:"role"`
+}
+
+type RoleDeleteEvent struct {
+	RoleID Snowflake `json:"role"`
+}

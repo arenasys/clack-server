@@ -475,6 +475,49 @@ func (tx *Transaction) AddRole(name string, color int, position int, permissions
 	return roleID, nil
 }
 
+func (tx *Transaction) UpdateRole(id Snowflake, name string, color int, position int, permissions int, hoisted bool, mentionable bool) error {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`UPDATE roles
+		SET
+			name = $name,
+			color = $color,
+			position = $position,
+			permissions = $permissions,
+			hoisted = $hoisted,
+			mentionable = $mentionable
+		WHERE id = $id;`,
+	)
+	defer tx.Finish(stmt)
+
+	stmt.SetInt64("$id", int64(id))
+	stmt.SetText("$name", name)
+	stmt.SetInt64("$color", int64(color))
+	stmt.SetInt64("$position", int64(position))
+	stmt.SetInt64("$permissions", int64(permissions))
+	stmt.SetBool("$hoisted", hoisted)
+	stmt.SetBool("$mentionable", mentionable)
+
+	if _, err := tx.Execute(stmt); err != nil {
+		return NewError(ErrorCodeInternalError, err)
+	}
+
+	return nil
+}
+
+func (tx *Transaction) DeleteRole(id Snowflake) error {
+	tx.MarkAsWrite()
+	stmt := tx.Prepare(`DELETE FROM roles WHERE id = $id;`)
+	defer tx.Finish(stmt)
+
+	stmt.SetInt64("$id", int64(id))
+
+	if _, err := tx.Execute(stmt); err != nil {
+		return NewError(ErrorCodeInternalError, err)
+	}
+
+	return nil
+}
+
 func (tx *Transaction) AddRoleToUser(userID Snowflake, roleID Snowflake) error {
 	tx.MarkAsWrite()
 	stmt := tx.Prepare(`INSERT INTO user_roles(user_id, role_id) VALUES ($user_id, $role_id);`)
