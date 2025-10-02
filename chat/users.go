@@ -43,8 +43,8 @@ type UserListGroup struct {
 func (i *UserIndex) Populate(conn *sqlite.Conn) {
 	tx := storage.NewTransaction(conn)
 	tx.Start()
-	users := tx.GetAllUsers()
-	roles := tx.GetAllRoles()
+	users, _ := tx.GetAllUsers()
+	roles, _ := tx.GetAllRoles()
 	tx.Commit(nil)
 
 	i.Mutex.Lock()

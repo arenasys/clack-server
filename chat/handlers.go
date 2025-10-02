@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"runtime/debug"
 	"time"
 
@@ -185,7 +186,7 @@ func (c *GatewayConnection) HandleOverviewRequest(db *sqlite.Conn) {
 	tx := storage.NewTransaction(db)
 	tx.Start()
 
-	channels := tx.GetAllChannels()
+	channels, _ := tx.GetAllChannels()
 	you, _ := tx.GetUser(c.userID)
 
 	tx.Commit(nil)
@@ -1010,4 +1011,226 @@ func (c *GatewayConnection) HandleRoleDeleteRequest(msg *UnknownEvent, db *sqlit
 		Type: EventTypeRoleDelete,
 		Data: RoleDeleteEvent{RoleID: req.RoleID},
 	})
+}
+
+func (c *GatewayConnection) HandleUserRoleAddRequest(msg *UnknownEvent, db *sqlite.Conn) {
+	var req UserRoleAddRequest
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	tx := storage.NewTransaction(db)
+	tx.Start()
+
+	perms, _ := tx.GetPermissionsByUser(c.userID)
+	if perms&PermissionManageRoles == 0 {
+		tx.Commit(nil)
+		c.HandleError(NewError(ErrorCodeNoPermission, nil))
+		return
+	}
+
+	targetUser, err := tx.GetUser(req.UserID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	role, err := tx.GetRole(req.RoleID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	for _, roleID := range targetUser.Roles {
+		if roleID == role.ID {
+			tx.Commit(nil)
+			return
+		}
+	}
+
+	actorUser, err := tx.GetUser(c.userID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	roleCache := map[Snowflake]int{role.ID: role.Position}
+	actorRank, err := userRoleRank(tx, actorUser, roleCache)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	targetRank, err := userRoleRank(tx, targetUser, roleCache)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	if req.UserID != c.userID && targetRank <= actorRank {
+		tx.Commit(nil)
+		c.HandleError(NewError(ErrorCodeNoPermission, nil))
+		return
+	}
+
+	if role.Position <= actorRank {
+		tx.Commit(nil)
+		c.HandleError(NewError(ErrorCodeNoPermission, nil))
+		return
+	}
+
+	if err := tx.AddRoleToUser(req.UserID, req.RoleID); err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	updatedUser, err := tx.GetUser(req.UserID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	tx.Commit(nil)
+
+	index := GetUserIndex(db)
+	index.UpdateUser(updatedUser)
+
+	gw.Relay(Event{
+		Type: EventTypeUserUpdate,
+		Data: UserUpdateEvent{User: updatedUser},
+	})
+}
+
+func (c *GatewayConnection) HandleUserRoleDeleteRequest(msg *UnknownEvent, db *sqlite.Conn) {
+	var req UserRoleDeleteRequest
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
+
+	tx := storage.NewTransaction(db)
+	tx.Start()
+
+	perms, _ := tx.GetPermissionsByUser(c.userID)
+	if perms&PermissionManageRoles == 0 {
+		tx.Commit(nil)
+		c.HandleError(NewError(ErrorCodeNoPermission, nil))
+		return
+	}
+
+	targetUser, err := tx.GetUser(req.UserID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	role, err := tx.GetRole(req.RoleID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	hasRole := false
+	for _, roleID := range targetUser.Roles {
+		if roleID == role.ID {
+			hasRole = true
+			break
+		}
+	}
+
+	if !hasRole {
+		tx.Commit(nil)
+		return
+	}
+
+	actorUser, err := tx.GetUser(c.userID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	roleCache := map[Snowflake]int{role.ID: role.Position}
+	actorRank, err := userRoleRank(tx, actorUser, roleCache)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	targetRank, err := userRoleRank(tx, targetUser, roleCache)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	if req.UserID != c.userID && targetRank <= actorRank {
+		tx.Commit(nil)
+		c.HandleError(NewError(ErrorCodeNoPermission, nil))
+		return
+	}
+
+	if role.Position <= actorRank {
+		tx.Commit(nil)
+		c.HandleError(NewError(ErrorCodeNoPermission, nil))
+		return
+	}
+
+	if err := tx.DeleteRoleFromUser(req.UserID, req.RoleID); err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	updatedUser, err := tx.GetUser(req.UserID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(err)
+		return
+	}
+
+	tx.Commit(nil)
+
+	index := GetUserIndex(db)
+	index.UpdateUser(updatedUser)
+
+	gw.Relay(Event{
+		Type: EventTypeUserUpdate,
+		Data: UserUpdateEvent{User: updatedUser},
+	})
+}
+
+func userRoleRank(tx *storage.Transaction, user User, cache map[Snowflake]int) (int, error) {
+	rank := math.MaxInt
+	for _, roleID := range user.Roles {
+		if pos, ok := cache[roleID]; ok {
+			if pos < rank {
+				rank = pos
+			}
+			continue
+		}
+		role, err := tx.GetRole(roleID)
+		if err != nil {
+			if cerr, ok := err.(*CodedError); ok && cerr.Code == ErrorCodeInvalidRequest {
+				continue
+			}
+			return 0, err
+		}
+		cache[roleID] = role.Position
+		if role.Position < rank {
+			rank = role.Position
+		}
+	}
+	return rank, nil
 }

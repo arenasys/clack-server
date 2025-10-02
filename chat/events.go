@@ -58,6 +58,9 @@ const (
 	EventTypeRegisterRequest = iota
 
 	EventTypeUploadSlot = iota
+
+	EventTypeUserRoleAdd    = iota
+	EventTypeUserRoleDelete = iota
 )
 
 type UnknownEvent struct {
@@ -289,4 +292,14 @@ type RoleUpdateEvent struct {
 
 type RoleDeleteEvent struct {
 	RoleID Snowflake `json:"role"`
+}
+
+type UserRoleAddRequest struct {
+	UserID Snowflake `json:"user" validate:"required"`
+	RoleID Snowflake `json:"role" validate:"required"`
+}
+
+type UserRoleDeleteRequest struct {
+	UserID Snowflake `json:"user" validate:"required"`
+	RoleID Snowflake `json:"role" validate:"required"`
 }

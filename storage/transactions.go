@@ -164,7 +164,7 @@ func (tx *Transaction) Checkpoint() {
 	}
 }
 
-func (tx *Transaction) QueryUsers(id Snowflake) []User {
+func (tx *Transaction) QueryUsers(id Snowflake) ([]User, error) {
 	query := `SELECT
 			u.id,
 			u.user_name,
@@ -192,7 +192,14 @@ func (tx *Transaction) QueryUsers(id Snowflake) []User {
 	users := []User{}
 
 	var currentUser *User = nil
-	for hasRow, _ := stmt.Step(); hasRow; hasRow, _ = stmt.Step() {
+	for {
+		hasRow, stepErr := stmt.Step()
+		if stepErr != nil {
+			return nil, NewError(ErrorCodeInternalError, stepErr)
+		}
+		if !hasRow {
+			break
+		}
 		user := User{
 			ID:             Snowflake(stmt.GetInt64("id")),
 			UserName:       stmt.GetText("user_name"),
@@ -223,22 +230,25 @@ func (tx *Transaction) QueryUsers(id Snowflake) []User {
 		users = append(users, *currentUser)
 	}
 
-	return users
+	return users, nil
 }
 
 func (tx *Transaction) GetUser(id Snowflake) (User, error) {
-	users := tx.QueryUsers(id)
+	users, err := tx.QueryUsers(id)
+	if err != nil {
+		return User{}, err
+	}
 	if len(users) == 0 {
-		return User{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("user not found", id))
+		return User{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("user not found"))
 	}
 	return users[0], nil
 }
 
-func (tx *Transaction) GetAllUsers() []User {
+func (tx *Transaction) GetAllUsers() ([]User, error) {
 	return tx.QueryUsers(0)
 }
 
-func (tx *Transaction) QueryChannels(id Snowflake) []Channel {
+func (tx *Transaction) QueryChannels(id Snowflake) ([]Channel, error) {
 	query := `SELECT
 			c.id,
 			c.type,
@@ -272,7 +282,14 @@ func (tx *Transaction) QueryChannels(id Snowflake) []Channel {
 	var currentChannel *Channel = nil
 	var currentPermissions map[Snowflake]map[Snowflake]bool = make(map[Snowflake]map[Snowflake]bool)
 
-	for hasRow, _ := stmt.Step(); hasRow; hasRow, _ = stmt.Step() {
+	for {
+		hasRow, stepErr := stmt.Step()
+		if stepErr != nil {
+			return nil, NewError(ErrorCodeInternalError, stepErr)
+		}
+		if !hasRow {
+			break
+		}
 		channel := Channel{
 			ID:          Snowflake(stmt.GetInt64("id")),
 			Type:        int(stmt.GetInt64("type")),
@@ -329,18 +346,21 @@ func (tx *Transaction) QueryChannels(id Snowflake) []Channel {
 		channels = append(channels, *currentChannel)
 	}
 
-	return channels
+	return channels, nil
 }
 
 func (tx *Transaction) GetChannel(id Snowflake) (Channel, error) {
-	channels := tx.QueryChannels(id)
+	channels, err := tx.QueryChannels(id)
+	if err != nil {
+		return Channel{}, err
+	}
 	if len(channels) == 0 {
 		return Channel{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("channel not found"))
 	}
 	return channels[0], nil
 }
 
-func (tx *Transaction) GetAllChannels() []Channel {
+func (tx *Transaction) GetAllChannels() ([]Channel, error) {
 	return tx.QueryChannels(0)
 }
 
@@ -400,7 +420,7 @@ func (tx *Transaction) AddChannel(name string, channelType int, description stri
 	return channelID, nil
 }
 
-func (tx *Transaction) QueryRoles(id Snowflake) []Role {
+func (tx *Transaction) QueryRoles(id Snowflake) ([]Role, error) {
 	query := `SELECT
 			id,
 			name,
@@ -423,30 +443,41 @@ func (tx *Transaction) QueryRoles(id Snowflake) []Role {
 
 	roles := []Role{}
 
-	for hasRow, _ := stmt.Step(); hasRow; hasRow, _ = stmt.Step() {
+	for {
+		hasRow, stepErr := stmt.Step()
+		if stepErr != nil {
+			return nil, NewError(ErrorCodeInternalError, stepErr)
+		}
+		if !hasRow {
+			break
+		}
 		role := Role{
 			ID:          Snowflake(stmt.GetInt64("id")),
 			Name:        stmt.GetText("name"),
 			Color:       int(stmt.GetInt64("color")),
 			Permissions: int(stmt.GetInt64("permissions")),
+			Position:    int(stmt.GetInt64("position")),
 			Hoisted:     stmt.GetInt64("hoisted") != 0,
 			Mentionable: stmt.GetInt64("mentionable") != 0,
 		}
 		roles = append(roles, role)
 	}
 
-	return roles
+	return roles, nil
 }
 
 func (tx *Transaction) GetRole(id Snowflake) (Role, error) {
-	roles := tx.QueryRoles(id)
+	roles, err := tx.QueryRoles(id)
+	if err != nil {
+		return Role{}, err
+	}
 	if len(roles) == 0 {
 		return Role{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("role not found"))
 	}
 	return roles[0], nil
 }
 
-func (tx *Transaction) GetAllRoles() []Role {
+func (tx *Transaction) GetAllRoles() ([]Role, error) {
 	return tx.QueryRoles(0)
 }
 
@@ -533,7 +564,7 @@ func (tx *Transaction) AddRoleToUser(userID Snowflake, roleID Snowflake) error {
 	return nil
 }
 
-func (tx *Transaction) RemoveRoleFromUser(userID Snowflake, roleID Snowflake) error {
+func (tx *Transaction) DeleteRoleFromUser(userID Snowflake, roleID Snowflake) error {
 	tx.MarkAsWrite()
 	stmt := tx.Prepare(`DELETE FROM user_roles WHERE user_id = $user_id AND role_id = $role_id;`)
 	defer tx.Finish(stmt)
@@ -547,7 +578,7 @@ func (tx *Transaction) RemoveRoleFromUser(userID Snowflake, roleID Snowflake) er
 
 	return nil
 }
-func (tx *Transaction) QueryEmojis(id Snowflake) []Emoji {
+func (tx *Transaction) QueryEmojis(id Snowflake) ([]Emoji, error) {
 	query := `SELECT
 			name,
 			id
@@ -556,12 +587,24 @@ func (tx *Transaction) QueryEmojis(id Snowflake) []Emoji {
 	if id != 0 {
 		query += ` WHERE id = $id`
 	}
+
 	stmt := tx.Prepare(query + ` ORDER BY name;`)
 	defer tx.Finish(stmt)
 
+	if id != 0 {
+		stmt.SetInt64("$id", int64(id))
+	}
+
 	emojis := []Emoji{}
 
-	for hasRow, _ := stmt.Step(); hasRow; hasRow, _ = stmt.Step() {
+	for {
+		hasRow, stepErr := stmt.Step()
+		if stepErr != nil {
+			return nil, NewError(ErrorCodeInternalError, stepErr)
+		}
+		if !hasRow {
+			break
+		}
 		emoji := Emoji{
 			Name: stmt.GetText("name"),
 			ID:   Snowflake(stmt.GetInt64("id")),
@@ -569,18 +612,21 @@ func (tx *Transaction) QueryEmojis(id Snowflake) []Emoji {
 		emojis = append(emojis, emoji)
 	}
 
-	return emojis
+	return emojis, nil
 }
 
 func (tx *Transaction) GetEmoji(id Snowflake) (Emoji, error) {
-	emjs := tx.QueryEmojis(id)
+	emjs, err := tx.QueryEmojis(id)
+	if err != nil {
+		return Emoji{}, err
+	}
 	if len(emjs) == 0 {
 		return Emoji{}, NewError(ErrorCodeInvalidRequest, fmt.Errorf("emoji with ID %d not found", id))
 	}
 	return emjs[0], nil
 }
 
-func (tx *Transaction) GetAllEmojis() []Emoji {
+func (tx *Transaction) GetAllEmojis() ([]Emoji, error) {
 	return tx.QueryEmojis(0)
 }
 
@@ -1034,7 +1080,7 @@ func (tx *Transaction) QueryMessages(stmt *sqlite.Stmt) ([]Message, error) {
 	// Iterate over the result rows
 	for hasRow, stepErr := stmt.Step(); hasRow; hasRow, stepErr = stmt.Step() {
 		if stepErr != nil {
-			return nil, fmt.Errorf("error stepping through messages: %w", stepErr)
+			return nil, NewError(ErrorCodeInternalError, fmt.Errorf("error stepping through messages: %w", stepErr))
 		}
 
 		// Extract basic message fields
@@ -1301,8 +1347,8 @@ func (tx *Transaction) AddEmbed(messageID Snowflake, embed *Embed) error {
 	// Handle Footer Information
 	if embed.Footer != nil {
 		embed_stmt.SetText("$footer_text", embed.Footer.Text)
-		embed_stmt.SetText("$footer_icon_url", embed.Footer.Icon.URL)
 		if embed.Footer.Icon != nil {
+			embed_stmt.SetText("$footer_icon_url", embed.Footer.Icon.URL)
 			embed_stmt.SetInt64("$footer_icon_id", int64(embed.Footer.Icon.ID))
 		}
 	}
@@ -1382,6 +1428,7 @@ func (tx *Transaction) DeleteEmbeds(embedIDs []Snowflake) error {
 		if _, err := tx.Execute(stmt); err != nil {
 			return NewError(ErrorCodeInternalError, fmt.Errorf("failed to delete embed %d: %w", embedID, err))
 		}
+		stmt.Reset()
 	}
 
 	return nil
@@ -1390,13 +1437,6 @@ func (tx *Transaction) DeleteEmbeds(embedIDs []Snowflake) error {
 func (tx *Transaction) AddMessage(message *Message) error {
 	tx.MarkAsWrite()
 	messages_stmt := tx.Prepare("INSERT OR REPLACE INTO messages (id, type, channel_id, timestamp, author_id, reference_id, content) VALUES ($id, $type, $channel_id, $timestamp, $author_id, $reference_id, $content);")
-	/*defer func() {
-		if r := recover(); r != nil {
-			var err error = r.(error)
-			commit(&err)
-			panic(r)
-		}
-	}()*/
 
 	messages_stmt.SetInt64("$id", int64(message.ID))
 	messages_stmt.SetInt64("$type", int64(message.Type))

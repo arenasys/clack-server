@@ -151,7 +151,7 @@ func PopulateDatabase(ctx context.Context) {
 
 	tx.Commit(nil)
 
-	createMainUser(db, roles[2])
+	createMainUser(db, roles[1])
 
 	const channelCount = 8
 	channels := [channelCount]Snowflake{}
