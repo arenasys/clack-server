@@ -126,18 +126,19 @@ type UsersResponse struct {
 }
 
 type UserListRequest struct {
-	StartGroup Snowflake `json:"startGroup"`
-	StartIndex int       `json:"startIndex"`
-	EndGroup   Snowflake `json:"endGroup"`
-	EndIndex   int       `json:"endIndex"`
+	Start int `json:"start"`
+	End   int `json:"end"`
+}
+
+type UserListGroup struct {
+	ID    Snowflake `json:"id"`
+	Count int       `json:"count"`
 }
 
 type UserListResponse struct {
-	StartGroup Snowflake `json:"startGroup"`
-	StartIndex int       `json:"startIndex"`
-	EndGroup   Snowflake `json:"endGroup"`
-	EndIndex   int       `json:"endIndex"`
-
+	Start  int             `json:"start"`
+	End    int             `json:"end"`
+	Slice  []Snowflake     `json:"slice"`
 	Groups []UserListGroup `json:"groups"`
 }
 
@@ -251,6 +252,12 @@ type UserUpdateRequest struct {
 	SetName    bool `json:"setName" validate:"required"`
 	SetProfile bool `json:"setProfile" validate:"required"`
 	SetAvatar  bool `json:"setAvatar" validate:"required"`
+}
+
+type UserPresence struct {
+	UserID   Snowflake `json:"user" validate:"required"`
+	Presence int       `json:"presence" validate:"required"`
+	Sticky   bool      `json:"sticky,omitempty"`
 }
 
 type UserAddEvent struct {

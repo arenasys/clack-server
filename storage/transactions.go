@@ -25,6 +25,9 @@ type Transaction struct {
 	conn    *sqlite.Conn
 	commit  func(*error)
 	isWrite bool
+
+	name  string
+	start time.Time
 }
 
 func NewTransaction(conn *sqlite.Conn) *Transaction {
@@ -59,6 +62,12 @@ func (tx *Transaction) Start() {
 	}
 }
 
+func (tx *Transaction) StartTimed(name string) {
+	tx.name = name
+	tx.start = time.Now()
+	tx.Start()
+}
+
 func (tx *Transaction) Commit(err error) {
 	if tx.commit == nil {
 		return
@@ -74,6 +83,9 @@ func (tx *Transaction) Commit(err error) {
 		}
 	}
 	tx.commit = nil
+	if tx.name != "" {
+		fmt.Printf("%s took %v\n", tx.name, time.Since(tx.start))
+	}
 }
 
 func (tx *Transaction) Prepare(query string) *sqlite.Stmt {
@@ -208,7 +220,8 @@ func (tx *Transaction) QueryUsers(id Snowflake) ([]User, error) {
 			ProfileMessage: stmt.GetText("profile_message"),
 			ProfileColor:   int(stmt.GetInt64("profile_color")),
 			AvatarModified: int(stmt.GetInt64("avatar_modified")),
-			Presence:       int(stmt.GetInt64("presence")),
+			PresenceSticky: int(stmt.GetInt64("presence")),
+			Presence:       UserPresenceNone, // let the index figure it out
 			Roles:          []Snowflake{},
 		}
 
@@ -234,6 +247,8 @@ func (tx *Transaction) QueryUsers(id Snowflake) ([]User, error) {
 }
 
 func (tx *Transaction) GetUser(id Snowflake) (User, error) {
+	// Should use UserIndex if presence is needed
+
 	users, err := tx.QueryUsers(id)
 	if err != nil {
 		return User{}, err
@@ -831,7 +846,7 @@ func (tx *Transaction) AddUser(userName, hash, salt, inviteCode, email string) (
 	stmt.SetText("$display_name", userName)
 	stmt.SetText("$hash", hash)
 	stmt.SetText("$salt", salt)
-	stmt.SetInt64("$presence", int64(UserPresenceOffline))
+	stmt.SetInt64("$presence", int64(UserPresenceNone))
 
 	if inviteCode != "" {
 		stmt.SetText("$invite_code", inviteCode)
@@ -1435,6 +1450,10 @@ func (tx *Transaction) DeleteEmbeds(embedIDs []Snowflake) error {
 }
 
 func (tx *Transaction) AddMessage(message *Message) error {
+	if _, err := tx.GetUser(message.AuthorID); err != nil {
+		return err
+	}
+
 	tx.MarkAsWrite()
 	messages_stmt := tx.Prepare("INSERT OR REPLACE INTO messages (id, type, channel_id, timestamp, author_id, reference_id, content) VALUES ($id, $type, $channel_id, $timestamp, $author_id, $reference_id, $content);")
 

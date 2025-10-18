@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"clack/common"
 	. "clack/common"
 	"clack/storage"
 	"io"
@@ -20,6 +21,7 @@ import (
 
 var gwLog = NewLogger("GATEWAY")
 
+var gwCtx context.Context
 var gw *Gateway
 
 type PendingRequest struct {
@@ -36,6 +38,12 @@ type Gateway struct {
 
 	pending      map[Snowflake]*PendingRequest
 	pendingMutex sync.RWMutex
+
+	index Index
+}
+
+func (gw *Gateway) GetIndex() *Index {
+	return &gw.index
 }
 
 func (gw *Gateway) AddConnection(conn *GatewayConnection) {
@@ -90,6 +98,8 @@ type GatewayConnection struct {
 
 	closing bool
 
+	lastUserListRange IndexRange
+
 	writeMutex sync.Mutex
 }
 
@@ -97,7 +107,11 @@ func (c *GatewayConnection) writeEvent(msg Event) {
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
 
-	writer, _ := c.ws.NextWriter(websocket.TextMessage)
+	writer, err := c.ws.NextWriter(websocket.TextMessage)
+	if err != nil {
+		gwLog.Printf("Failed to get writer: %v", err)
+		return
+	}
 
 	encoder := json.NewEncoder(writer)
 	encoder.SetEscapeHTML(false)
@@ -356,6 +370,10 @@ func HandleGatewayConnection(ctx context.Context, conn *websocket.Conn, token st
 		session: GetRandom256(),
 		queue:   make(chan *Event, 16),
 		closing: false,
+		lastUserListRange: IndexRange{
+			From: 0,
+			To:   0,
+		},
 	}
 
 	c.Run(token)
@@ -450,11 +468,60 @@ func HandleGatewayUpload(ctx context.Context, slotID Snowflake, mr *multipart.Re
 
 }
 
+func StartGateway(ctx *common.ClackContext) {
+	gwCtx = ctx
+	ctx.Subsystems.Add(1)
+
+	conn, _ := storage.OpenConnection(gwCtx)
+	index := gw.GetIndex()
+	index.Build(conn)
+	storage.CloseConnection(conn)
+
+	gwLog.Println("Started")
+
+	go func() {
+		<-gwCtx.Done()
+		gwLog.Println("Finished")
+		ctx.Subsystems.Done()
+	}()
+
+	go func(ctx context.Context) {
+		for ctx.Err() == nil {
+			if gw.index.Invalidated {
+
+				changes := gw.index.UpdateUserList()
+
+				gw.connectionsMutex.RLock()
+				for _, c := range gw.connections {
+					last := c.lastUserListRange
+					for _, change := range changes {
+						if last.Overlaps(change) {
+							resp := index.GetUserListSlice(last.From, last.To, 128)
+							c.Write(Event{
+								Type: EventTypeUserListResponse,
+								Data: resp,
+							})
+							break
+						}
+					}
+				}
+				gw.connectionsMutex.RUnlock()
+
+				time.Sleep(1 * time.Second)
+			} else {
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}(gwCtx)
+
+}
+
 func init() {
 	gw = &Gateway{
 		connectionsMutex: sync.RWMutex{},
 		connections:      make(map[string]*GatewayConnection),
 		pendingMutex:     sync.RWMutex{},
 		pending:          make(map[Snowflake]*PendingRequest),
+		index:            Index{},
 	}
 }

@@ -73,13 +73,13 @@ func PopulateDatabase(ctx context.Context) {
 	if err != nil {
 		panic(err)
 	}
-	roles[2], err = tx.AddRole("Member", 0xf1c40f, 2, PermissionDefault, false, false)
+	roles[2], err = tx.AddRole("Member", 0xf1c40f, 2, PermissionDefault, true, false)
 	if err != nil {
 		panic(err)
 	}
 	tx.Commit(nil)
 
-	const userCount = 1000
+	const userCount = 100000
 	users := [userCount]Snowflake{}
 
 	tx.Start()

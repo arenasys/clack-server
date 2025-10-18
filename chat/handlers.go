@@ -147,7 +147,7 @@ func (c *GatewayConnection) HandleRegisterRequest(msg *UnknownEvent, db *sqlite.
 
 	fmt.Println("Registered user", user.ID, token)
 
-	index := GetUserIndex(db)
+	index := gw.GetIndex()
 	index.AddUser(user)
 
 	c.OnAuthentication(user.ID, token)
@@ -160,25 +160,24 @@ func (c *GatewayConnection) HandleRegisterRequest(msg *UnknownEvent, db *sqlite.
 	})
 }
 
-func (c *GatewayConnection) HandleOverviewRequest(db *sqlite.Conn) {
-	index := GetUserIndex(db)
+func (c *GatewayConnection) UpdateLastUserListRequest(start, end int) {
+	c.lastUserListRange.From = start
+	c.lastUserListRange.To = end
+}
 
-	userList := index.GetUserListSlice(UserListRequest{
-		StartGroup: -1,
-		StartIndex: 0,
-		EndGroup:   -1,
-		EndIndex:   0,
-	}, 20)
+func (c *GatewayConnection) HandleOverviewRequest(db *sqlite.Conn) {
+	index := gw.GetIndex()
+
+	c.UpdateLastUserListRequest(0, 20)
+	userList := index.GetUserListSlice(0, 20, 20)
 
 	users := []User{}
-	for _, group := range userList.Groups {
-		for _, id := range group.Users {
-			user, ok := index.GetUser(id)
-			if !ok {
-				continue
-			}
-			users = append(users, user)
+	for _, id := range userList.Slice {
+		user, ok := index.GetUser(id)
+		if !ok {
+			continue
 		}
+		users = append(users, user)
 	}
 
 	roles := index.GetAllRoles()
@@ -187,7 +186,7 @@ func (c *GatewayConnection) HandleOverviewRequest(db *sqlite.Conn) {
 	tx.Start()
 
 	channels, _ := tx.GetAllChannels()
-	you, _ := tx.GetUser(c.userID)
+	you, _ := index.GetUser(c.userID)
 
 	tx.Commit(nil)
 
@@ -291,7 +290,7 @@ func (c *GatewayConnection) HandleUsersRequest(msg *UnknownEvent, db *sqlite.Con
 		return
 	}
 
-	index := GetUserIndex(db)
+	index := gw.GetIndex()
 
 	resp := UsersResponse{
 		Users: index.GetUsers(req.Users),
@@ -310,8 +309,11 @@ func (c *GatewayConnection) HandleUserListRequest(msg *UnknownEvent, db *sqlite.
 		return
 	}
 
-	index := GetUserIndex(db)
-	resp := index.GetUserListSlice(req, 128)
+	index := gw.GetIndex()
+
+	c.UpdateLastUserListRequest(req.Start, req.End)
+
+	resp := index.GetUserListSlice(req.Start, req.End, 128)
 
 	c.Write(Event{
 		Type: EventTypeUserListResponse,
@@ -448,12 +450,6 @@ func (c *GatewayConnection) FinalizeMessageSendRequest(rawMessage *Message, seq 
 
 	message.EmbeddableURLs = rawMessage.EmbeddableURLs
 
-	user, err := tx.GetUser(message.AuthorID)
-	if err != nil {
-		tx.Commit(err)
-		return err
-	}
-
 	reference := Message{}
 	if message.ReferenceID != 0 {
 		reference, _ = tx.GetMessage(message.ReferenceID)
@@ -468,6 +464,9 @@ func (c *GatewayConnection) FinalizeMessageSendRequest(rawMessage *Message, seq 
 			MessageID: message.ID,
 		},
 	})
+
+	index := gw.GetIndex()
+	user, _ := index.GetUser(message.AuthorID)
 
 	gw.OnMessageAdd(&MessageAddEvent{
 		Message:   message,
@@ -839,9 +838,8 @@ func (c *GatewayConnection) FinalizeUserUpdateRequest(req *UserUpdateRequest, db
 
 	tx.Commit(nil)
 
-	// Update in-memory index and invalidate groups if needed
-	index := GetUserIndex(db)
-	index.UpdateUser(user)
+	index := gw.GetIndex()
+	user = index.UpdateUser(user)
 
 	gw.Relay(Event{
 		Type: EventTypeUserUpdate,
@@ -920,12 +918,8 @@ func (c *GatewayConnection) HandleRoleAddRequest(msg *UnknownEvent, db *sqlite.C
 
 	tx.Commit(nil)
 
-	// Update index cache
-	index := GetUserIndex(db)
-	index.Mutex.Lock()
-	index.Roles[role.ID] = role
-	index.Mutex.Unlock()
-	index.InvalidateGroups()
+	index := gw.GetIndex()
+	index.AddRole(role)
 
 	gw.Relay(Event{
 		Type: EventTypeRoleAdd,
@@ -965,11 +959,8 @@ func (c *GatewayConnection) HandleRoleUpdateRequest(msg *UnknownEvent, db *sqlit
 
 	tx.Commit(nil)
 
-	index := GetUserIndex(db)
-	index.Mutex.Lock()
-	index.Roles[role.ID] = role
-	index.Mutex.Unlock()
-	index.InvalidateGroups()
+	index := gw.GetIndex()
+	index.UpdateRole(role)
 
 	gw.Relay(Event{
 		Type: EventTypeRoleUpdate,
@@ -1001,11 +992,8 @@ func (c *GatewayConnection) HandleRoleDeleteRequest(msg *UnknownEvent, db *sqlit
 
 	tx.Commit(nil)
 
-	index := GetUserIndex(db)
-	index.Mutex.Lock()
-	delete(index.Roles, req.RoleID)
-	index.Mutex.Unlock()
-	index.InvalidateGroups()
+	index := gw.GetIndex()
+	index.DeleteRole(req.RoleID)
 
 	gw.Relay(Event{
 		Type: EventTypeRoleDelete,
@@ -1059,14 +1047,14 @@ func (c *GatewayConnection) HandleUserRoleAddRequest(msg *UnknownEvent, db *sqli
 	}
 
 	roleCache := map[Snowflake]int{role.ID: role.Position}
-	actorRank, err := userRoleRank(tx, actorUser, roleCache)
+	actorRank, err := ComputeEffectiveRank(tx, actorUser, roleCache)
 	if err != nil {
 		tx.Commit(err)
 		c.HandleError(err)
 		return
 	}
 
-	targetRank, err := userRoleRank(tx, targetUser, roleCache)
+	targetRank, err := ComputeEffectiveRank(tx, targetUser, roleCache)
 	if err != nil {
 		tx.Commit(err)
 		c.HandleError(err)
@@ -1100,8 +1088,8 @@ func (c *GatewayConnection) HandleUserRoleAddRequest(msg *UnknownEvent, db *sqli
 
 	tx.Commit(nil)
 
-	index := GetUserIndex(db)
-	index.UpdateUser(updatedUser)
+	index := gw.GetIndex()
+	updatedUser = index.UpdateUser(updatedUser)
 
 	gw.Relay(Event{
 		Type: EventTypeUserUpdate,
@@ -1117,7 +1105,7 @@ func (c *GatewayConnection) HandleUserRoleDeleteRequest(msg *UnknownEvent, db *s
 	}
 
 	tx := storage.NewTransaction(db)
-	tx.Start()
+	tx.StartTimed("UserRoleDelete")
 
 	perms, _ := tx.GetPermissionsByUser(c.userID)
 	if perms&PermissionManageRoles == 0 {
@@ -1161,14 +1149,14 @@ func (c *GatewayConnection) HandleUserRoleDeleteRequest(msg *UnknownEvent, db *s
 	}
 
 	roleCache := map[Snowflake]int{role.ID: role.Position}
-	actorRank, err := userRoleRank(tx, actorUser, roleCache)
+	actorRank, err := ComputeEffectiveRank(tx, actorUser, roleCache)
 	if err != nil {
 		tx.Commit(err)
 		c.HandleError(err)
 		return
 	}
 
-	targetRank, err := userRoleRank(tx, targetUser, roleCache)
+	targetRank, err := ComputeEffectiveRank(tx, targetUser, roleCache)
 	if err != nil {
 		tx.Commit(err)
 		c.HandleError(err)
@@ -1202,8 +1190,8 @@ func (c *GatewayConnection) HandleUserRoleDeleteRequest(msg *UnknownEvent, db *s
 
 	tx.Commit(nil)
 
-	index := GetUserIndex(db)
-	index.UpdateUser(updatedUser)
+	index := gw.GetIndex()
+	updatedUser = index.UpdateUser(updatedUser)
 
 	gw.Relay(Event{
 		Type: EventTypeUserUpdate,
@@ -1211,7 +1199,9 @@ func (c *GatewayConnection) HandleUserRoleDeleteRequest(msg *UnknownEvent, db *s
 	})
 }
 
-func userRoleRank(tx *storage.Transaction, user User, cache map[Snowflake]int) (int, error) {
+func ComputeEffectiveRank(tx *storage.Transaction, user User, cache map[Snowflake]int) (int, error) {
+	// Todo: Compute in user query
+
 	rank := math.MaxInt
 	for _, roleID := range user.Roles {
 		if pos, ok := cache[roleID]; ok {

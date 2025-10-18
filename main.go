@@ -10,6 +10,7 @@ import (
 
 	. "clack/common"
 
+	"clack/chat"
 	"clack/network"
 	"clack/storage"
 	"clack/testing"
@@ -48,13 +49,14 @@ func main() {
 	}
 
 	storage.StartDatabase(mainCtx)
-	network.StartServer(mainCtx)
-
 	if !dataExists {
 		mainLog.Println("Populating database")
 		testing.PopulateDatabase(mainCtx)
 		mainLog.Println("Done")
 	}
+
+	network.StartServer(mainCtx)
+	chat.StartGateway(mainCtx)
 
 	<-mainCtx.Done()
 	mainCtx.Subsystems.Wait()

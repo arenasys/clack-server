@@ -2,6 +2,8 @@ package common
 
 import (
 	"clack/common/snowflake"
+	"encoding/json"
+	"fmt"
 )
 
 type Snowflake = snowflake.Snowflake
@@ -12,9 +14,11 @@ const ProfileColorDefault = -1
 const AvatarModifiedDefault = 0
 
 const (
-	UserPresenceOffline = iota
-	UserPresenceOnline  = iota
-	UserPresenceAway    = iota
+	UserPresenceNone         = iota
+	UserPresenceOffline      = iota
+	UserPresenceOnline       = iota
+	UserPresenceAway         = iota
+	UserPresenceDoNotDisturb = iota
 )
 
 type User struct {
@@ -27,6 +31,18 @@ type User struct {
 	AvatarModified int         `json:"avatarModified"`
 	Presence       int         `json:"presence" validate:"required"`
 	Roles          []Snowflake `json:"roles"`
+
+	// Internal
+	PresenceSticky int `json:"-"`
+}
+
+func (u User) MarshalJSON() ([]byte, error) {
+	if u.Presence == UserPresenceNone {
+		fmt.Printf("WARNING: Marshaling user without presence: %s\n", u.UserName)
+	}
+	type alias User
+	aux := alias(u)
+	return json.Marshal(aux)
 }
 
 func (u User) IsOnline() bool {
