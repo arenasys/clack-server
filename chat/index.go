@@ -46,6 +46,7 @@ type Index struct {
 	Users       map[Snowflake]User
 	UserInfos   map[Snowflake]UserInfo
 	Roles       map[Snowflake]Role
+	Channels    map[Snowflake]Channel
 	List        UserList
 	Invalidated bool
 	Mutex       sync.RWMutex
@@ -239,6 +240,7 @@ func (i *Index) Build(conn *sqlite.Conn) {
 
 	i.Users = make(map[Snowflake]User)
 	i.Roles = make(map[Snowflake]Role)
+	i.Channels = make(map[Snowflake]Channel)
 	i.UserInfos = make(map[Snowflake]UserInfo)
 
 	roles, err := tx.GetAllRoles()
@@ -247,6 +249,14 @@ func (i *Index) Build(conn *sqlite.Conn) {
 	}
 	for _, r := range roles {
 		i.Roles[r.ID] = r
+	}
+
+	channels, err := tx.GetAllChannels()
+	if err != nil {
+		panic(err)
+	}
+	for _, c := range channels {
+		i.Channels[c.ID] = c
 	}
 
 	users, err := tx.GetAllUsers()
@@ -347,6 +357,46 @@ func (i *Index) DeleteRole(id Snowflake) {
 	i.Mutex.Lock()
 	defer i.Mutex.Unlock()
 	delete(i.Roles, id)
+	i.Invalidated = true
+}
+
+func (i *Index) GetChannel(id Snowflake) (Channel, bool) {
+	i.Mutex.RLock()
+	defer i.Mutex.RUnlock()
+	channel, ok := i.Channels[id]
+	return channel, ok
+}
+
+func (i *Index) GetAllChannels() []Channel {
+	i.Mutex.RLock()
+	defer i.Mutex.RUnlock()
+	var channels []Channel
+	for _, channel := range i.Channels {
+		channels = append(channels, channel)
+	}
+	return channels
+}
+
+func (i *Index) AddChannel(channel Channel) {
+	i.Mutex.Lock()
+	defer i.Mutex.Unlock()
+
+	i.Channels[channel.ID] = channel
+	i.Invalidated = true
+}
+
+func (i *Index) UpdateChannel(channel Channel) {
+	i.Mutex.Lock()
+	defer i.Mutex.Unlock()
+
+	i.Channels[channel.ID] = channel
+	i.Invalidated = true
+}
+
+func (i *Index) DeleteChannel(id Snowflake) {
+	i.Mutex.Lock()
+	defer i.Mutex.Unlock()
+	delete(i.Channels, id)
 	i.Invalidated = true
 }
 
