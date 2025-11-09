@@ -158,6 +158,12 @@ func (c *GatewayConnection) HandleRegisterRequest(msg *UnknownEvent, db *sqlite.
 			Token: token,
 		},
 	})
+
+	gw.OnUserAdd(
+		&UserAddEvent{
+			User: user,
+		},
+	)
 }
 
 func (c *GatewayConnection) UpdateLastUserListRequest(start, end int) {
@@ -599,12 +605,11 @@ func (c *GatewayConnection) HandleMessageDeleteRequest(msg *UnknownEvent, db *sq
 
 	tx.Commit(nil)
 
-	gw.Relay(Event{
-		Type: EventTypeMessageDelete,
-		Data: MessageDeleteEvent{
+	gw.OnMessageDelete(
+		&MessageDeleteEvent{
 			MessageID: req.MessageID,
 		},
-	})
+	)
 }
 
 func (c *GatewayConnection) HandleMessageReactionAddRequest(msg *UnknownEvent, db *sqlite.Conn) {
@@ -641,14 +646,13 @@ func (c *GatewayConnection) HandleMessageReactionAddRequest(msg *UnknownEvent, d
 
 	tx.Commit(nil)
 
-	gw.Relay(Event{
-		Type: EventTypeMessageReactionAdd,
-		Data: ReactionAddEvent{
+	gw.OnReactionAdd(
+		&ReactionAddEvent{
 			MessageID: req.MessageID,
 			UserID:    c.userID,
 			EmojiID:   req.EmojiID,
 		},
-	})
+	)
 }
 
 func (c *GatewayConnection) HandleMessageReactionDeleteRequest(msg *UnknownEvent, db *sqlite.Conn) {
@@ -669,14 +673,13 @@ func (c *GatewayConnection) HandleMessageReactionDeleteRequest(msg *UnknownEvent
 
 	tx.Commit(nil)
 
-	gw.Relay(Event{
-		Type: EventTypeMessageReactionDelete,
-		Data: ReactionDeleteEvent{
+	gw.OnReactionDelete(
+		&ReactionDeleteEvent{
 			MessageID: req.MessageID,
 			UserID:    c.userID,
 			EmojiID:   req.EmojiID,
 		},
-	})
+	)
 }
 
 func (c *GatewayConnection) HandleMessageReactionUsersRequest(msg *UnknownEvent, db *sqlite.Conn) {
@@ -841,12 +844,11 @@ func (c *GatewayConnection) FinalizeUserUpdateRequest(req *UserUpdateRequest, db
 	index := gw.GetIndex()
 	user = index.UpdateUser(user)
 
-	gw.Relay(Event{
-		Type: EventTypeUserUpdate,
-		Data: UserUpdateEvent{
+	gw.OnUserUpdate(
+		&UserUpdateEvent{
 			User: user,
 		},
-	})
+	)
 }
 
 func (c *GatewayConnection) TryEmbedURLs(id Snowflake, urls []string, db *sqlite.Conn) {
@@ -921,10 +923,11 @@ func (c *GatewayConnection) HandleRoleAddRequest(msg *UnknownEvent, db *sqlite.C
 	index := gw.GetIndex()
 	index.AddRole(role)
 
-	gw.Relay(Event{
-		Type: EventTypeRoleAdd,
-		Data: RoleAddEvent{Role: role},
-	})
+	gw.OnRoleAdd(
+		&RoleAddEvent{
+			Role: role,
+		},
+	)
 }
 
 func (c *GatewayConnection) HandleRoleUpdateRequest(msg *UnknownEvent, db *sqlite.Conn) {
@@ -962,10 +965,11 @@ func (c *GatewayConnection) HandleRoleUpdateRequest(msg *UnknownEvent, db *sqlit
 	index := gw.GetIndex()
 	index.UpdateRole(role)
 
-	gw.Relay(Event{
-		Type: EventTypeRoleUpdate,
-		Data: RoleUpdateEvent{Role: role},
-	})
+	gw.OnRoleUpdate(
+		&RoleUpdateEvent{
+			Role: role,
+		},
+	)
 }
 
 func (c *GatewayConnection) HandleRoleDeleteRequest(msg *UnknownEvent, db *sqlite.Conn) {
@@ -995,10 +999,11 @@ func (c *GatewayConnection) HandleRoleDeleteRequest(msg *UnknownEvent, db *sqlit
 	index := gw.GetIndex()
 	index.DeleteRole(req.RoleID)
 
-	gw.Relay(Event{
-		Type: EventTypeRoleDelete,
-		Data: RoleDeleteEvent{RoleID: req.RoleID},
-	})
+	gw.OnRoleDelete(
+		&RoleDeleteEvent{
+			RoleID: req.RoleID,
+		},
+	)
 }
 
 func (c *GatewayConnection) HandleUserRoleAddRequest(msg *UnknownEvent, db *sqlite.Conn) {
@@ -1091,10 +1096,9 @@ func (c *GatewayConnection) HandleUserRoleAddRequest(msg *UnknownEvent, db *sqli
 	index := gw.GetIndex()
 	updatedUser = index.UpdateUser(updatedUser)
 
-	gw.Relay(Event{
-		Type: EventTypeUserUpdate,
-		Data: UserUpdateEvent{User: updatedUser},
-	})
+	gw.OnUserUpdate(
+		&UserUpdateEvent{User: updatedUser},
+	)
 }
 
 func (c *GatewayConnection) HandleUserRoleDeleteRequest(msg *UnknownEvent, db *sqlite.Conn) {
@@ -1193,10 +1197,9 @@ func (c *GatewayConnection) HandleUserRoleDeleteRequest(msg *UnknownEvent, db *s
 	index := gw.GetIndex()
 	updatedUser = index.UpdateUser(updatedUser)
 
-	gw.Relay(Event{
-		Type: EventTypeUserUpdate,
-		Data: UserUpdateEvent{User: updatedUser},
-	})
+	gw.OnUserUpdate(
+		&UserUpdateEvent{User: updatedUser},
+	)
 }
 
 func ComputeEffectiveRank(tx *storage.Transaction, user User, cache map[Snowflake]int) (int, error) {
