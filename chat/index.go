@@ -50,6 +50,7 @@ type Index struct {
 	List        UserList
 	Invalidated bool
 	Mutex       sync.RWMutex
+	Settings    Settings
 }
 
 func (i *Index) UpdateUserList() []IndexRange {
@@ -204,7 +205,7 @@ func (i *Index) computeUserInfo(u User) UserInfo {
 	rank := math.MaxInt
 	hoistRank := math.MaxInt
 	hoist := Snowflake(0)
-	perms := 0
+	perms := i.Settings.DefaultPermissions
 
 	for _, roleID := range u.Roles {
 		role, ok := i.Roles[roleID]
@@ -219,6 +220,9 @@ func (i *Index) computeUserInfo(u User) UserInfo {
 			hoist = role.ID
 		}
 		perms |= role.Permissions
+	}
+	if (perms & PermissionAdministrator) != 0 {
+		perms = PermissionAll
 	}
 
 	return UserInfo{
@@ -242,6 +246,12 @@ func (i *Index) Build(conn *sqlite.Conn) {
 	i.Roles = make(map[Snowflake]Role)
 	i.Channels = make(map[Snowflake]Channel)
 	i.UserInfos = make(map[Snowflake]UserInfo)
+
+	settings, err := tx.GetSettings()
+	if err != nil {
+		panic(err)
+	}
+	i.Settings = settings
 
 	roles, err := tx.GetAllRoles()
 	if err != nil {
@@ -402,4 +412,54 @@ func (i *Index) DeleteChannel(id Snowflake) {
 
 func (i *Index) Invalidate() {
 	i.Invalidated = true
+}
+
+func (i *Index) GetPermissionsByUser(userID Snowflake) int {
+	info, ok := i.UserInfos[userID]
+	if !ok {
+		return 0
+	}
+
+	return info.Permissions
+}
+
+func (i *Index) GetPermissionsByChannel(userID Snowflake, channelID Snowflake) int {
+	var allow int = i.GetPermissionsByUser(userID)
+	var deny int = 0
+	var user User
+	var ok bool
+
+	if user, ok = i.GetUser(userID); !ok {
+		return 0
+	}
+
+	if channelID != 0 {
+		channel, ok := i.GetChannel(channelID)
+		if ok {
+			for _, overwrite := range channel.Overwrites {
+				if overwrite.Type == OverwriteTypeRole {
+					for _, roleID := range user.Roles {
+						if overwrite.ID == roleID {
+							allow |= overwrite.Allow
+							deny |= overwrite.Deny
+							break
+						}
+					}
+				} else if overwrite.Type == OverwriteTypeUser {
+					if overwrite.ID == user.ID {
+						allow |= overwrite.Allow
+						deny |= overwrite.Deny
+					}
+				}
+			}
+		}
+	}
+
+	permissions := allow & (^deny)
+
+	if (permissions & PermissionAdministrator) != 0 {
+		return PermissionAll
+	}
+
+	return permissions
 }
