@@ -43,14 +43,115 @@ type UserList struct {
 }
 
 type Index struct {
-	Users       map[Snowflake]User
-	UserInfos   map[Snowflake]UserInfo
-	Roles       map[Snowflake]Role
-	Channels    map[Snowflake]Channel
-	List        UserList
-	Invalidated bool
-	Mutex       sync.RWMutex
-	Settings    Settings
+	Users     map[Snowflake]User
+	UserInfos map[Snowflake]*UserInfo
+	Roles     map[Snowflake]Role
+	Channels  map[Snowflake]Channel
+	List      UserList
+	Settings  Settings
+	Stale     bool
+	Mutex     sync.RWMutex
+}
+
+// Populates the index from the database (settings, roles, channels, users)
+func (i *Index) PopulateIndex(conn *sqlite.Conn) {
+	startTotal := time.Now()
+	i.Mutex.Lock()
+	tx := storage.NewTransaction(conn)
+	tx.Start()
+
+	i.Users = make(map[Snowflake]User)
+	i.Roles = make(map[Snowflake]Role)
+	i.Channels = make(map[Snowflake]Channel)
+	i.UserInfos = make(map[Snowflake]*UserInfo)
+
+	startSettings := time.Now()
+	settings, err := tx.GetSettings()
+	if err != nil {
+		panic(err)
+	}
+	i.Settings = settings
+	gwLog.Printf("Index.PopulateIndex: settings loaded in %v", time.Since(startSettings))
+
+	startRoles := time.Now()
+	roles, err := tx.GetAllRoles()
+	if err != nil {
+		panic(err)
+	}
+	for _, r := range roles {
+		i.Roles[r.ID] = r
+	}
+	gwLog.Printf("Index.PopulateIndex: roles loaded in %v", time.Since(startRoles))
+
+	startChannels := time.Now()
+	channels, err := tx.GetAllChannels()
+	if err != nil {
+		panic(err)
+	}
+	for _, c := range channels {
+		i.Channels[c.ID] = c
+	}
+	gwLog.Printf("Index.PopulateIndex: channels loaded in %v", time.Since(startChannels))
+
+	startUsers := time.Now()
+	users, err := tx.GetAllUsers()
+	if err != nil {
+		panic(err)
+	}
+	for _, u := range users {
+		i.Users[u.ID] = i.processUser(u)
+		i.UserInfos[u.ID] = &UserInfo{}
+	}
+	gwLog.Printf("Index.PopulateIndex: users loaded in %v", time.Since(startUsers))
+
+	tx.Commit(nil)
+	i.Mutex.Unlock()
+	gwLog.Printf("Index.PopulateIndex: total time %v", time.Since(startTotal))
+}
+
+func (i *Index) UpdateUserInfos() {
+	start := time.Now()
+
+	i.Mutex.RLock()
+
+	arrayStart := time.Now()
+	ids := make([]Snowflake, 0, len(i.UserInfos))
+	for id := range i.UserInfos {
+		ids = append(ids, id)
+	}
+	gwLog.Printf("Index.ComputeUserInfos: collected %d IDs in %v", len(ids), time.Since(arrayStart))
+
+	totalIDs := len(ids)
+
+	workerCount := 8
+	var wg sync.WaitGroup
+	for w := 0; w < workerCount; w++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for idx := worker; idx < totalIDs; idx += workerCount {
+				id := ids[idx]
+				user, ok := i.Users[id]
+				if !ok {
+					continue
+				}
+				*i.UserInfos[id] = i.computeUserInfo(user)
+			}
+		}(w)
+	}
+
+	wg.Wait()
+	i.Mutex.RUnlock()
+
+	totalTime := time.Since(start)
+	gwLog.Printf("Index.ComputeUserInfos: total %v (workers=%d, ids=%d)", totalTime, workerCount, totalIDs)
+}
+
+// Sorts and groups users for the user list
+func (i *Index) SortUserList() {
+	start := time.Now()
+	i.UpdateUserList()
+	gwLog.Printf("Index.SortUserList: user list updated in %v", time.Since(start))
 }
 
 func (i *Index) UpdateUserList() []IndexRange {
@@ -166,7 +267,7 @@ func (i *Index) UpdateUserList() []IndexRange {
 
 	i.Mutex.Lock()
 	i.List = next
-	i.Invalidated = false
+	i.Stale = false
 	i.Mutex.Unlock()
 
 	return changes
@@ -238,49 +339,11 @@ func (i *Index) processUser(user User) User {
 }
 
 func (i *Index) Build(conn *sqlite.Conn) {
-	i.Mutex.Lock()
-	tx := storage.NewTransaction(conn)
-	tx.Start()
-
-	i.Users = make(map[Snowflake]User)
-	i.Roles = make(map[Snowflake]Role)
-	i.Channels = make(map[Snowflake]Channel)
-	i.UserInfos = make(map[Snowflake]UserInfo)
-
-	settings, err := tx.GetSettings()
-	if err != nil {
-		panic(err)
-	}
-	i.Settings = settings
-
-	roles, err := tx.GetAllRoles()
-	if err != nil {
-		panic(err)
-	}
-	for _, r := range roles {
-		i.Roles[r.ID] = r
-	}
-
-	channels, err := tx.GetAllChannels()
-	if err != nil {
-		panic(err)
-	}
-	for _, c := range channels {
-		i.Channels[c.ID] = c
-	}
-
-	users, err := tx.GetAllUsers()
-	if err != nil {
-		panic(err)
-	}
-	for _, u := range users {
-		i.Users[u.ID] = i.processUser(u)
-		i.UserInfos[u.ID] = i.computeUserInfo(u)
-	}
-	tx.Commit(nil)
-	i.Mutex.Unlock()
-
-	i.UpdateUserList()
+	start := time.Now()
+	i.PopulateIndex(conn)
+	i.UpdateUserInfos()
+	i.SortUserList()
+	gwLog.Printf("Index.Build: total time %v", time.Since(start))
 }
 
 func (i *Index) GetUser(id Snowflake) (User, bool) {
@@ -307,8 +370,9 @@ func (i *Index) AddUser(user User) User {
 	defer i.Mutex.Unlock()
 
 	i.Users[user.ID] = i.processUser(user)
-	i.UserInfos[user.ID] = i.computeUserInfo(user)
-	i.Invalidated = true
+	i.UserInfos[user.ID] = &UserInfo{}
+	*i.UserInfos[user.ID] = i.computeUserInfo(user)
+	i.Stale = true
 	return i.Users[user.ID]
 }
 
@@ -317,8 +381,11 @@ func (i *Index) UpdateUser(user User) User {
 	defer i.Mutex.Unlock()
 
 	i.Users[user.ID] = i.processUser(user)
-	i.UserInfos[user.ID] = i.computeUserInfo(user)
-	i.Invalidated = true
+	if i.UserInfos[user.ID] == nil {
+		i.UserInfos[user.ID] = &UserInfo{}
+	}
+	*i.UserInfos[user.ID] = i.computeUserInfo(user)
+	i.Stale = true
 	return i.Users[user.ID]
 }
 
@@ -327,7 +394,7 @@ func (i *Index) DeleteUser(id Snowflake) {
 	defer i.Mutex.Unlock()
 	delete(i.Users, id)
 	delete(i.UserInfos, id)
-	i.Invalidated = true
+	i.Stale = true
 }
 
 func (i *Index) GetRole(id Snowflake) (Role, bool) {
@@ -352,7 +419,7 @@ func (i *Index) AddRole(role Role) {
 	defer i.Mutex.Unlock()
 
 	i.Roles[role.ID] = role
-	i.Invalidated = true
+	i.Stale = true
 }
 
 func (i *Index) UpdateRole(role Role) {
@@ -360,14 +427,14 @@ func (i *Index) UpdateRole(role Role) {
 	defer i.Mutex.Unlock()
 
 	i.Roles[role.ID] = role
-	i.Invalidated = true
+	i.Stale = true
 }
 
 func (i *Index) DeleteRole(id Snowflake) {
 	i.Mutex.Lock()
 	defer i.Mutex.Unlock()
 	delete(i.Roles, id)
-	i.Invalidated = true
+	i.Stale = true
 }
 
 func (i *Index) GetChannel(id Snowflake) (Channel, bool) {
@@ -392,7 +459,7 @@ func (i *Index) AddChannel(channel Channel) {
 	defer i.Mutex.Unlock()
 
 	i.Channels[channel.ID] = channel
-	i.Invalidated = true
+	i.Stale = true
 }
 
 func (i *Index) UpdateChannel(channel Channel) {
@@ -400,26 +467,21 @@ func (i *Index) UpdateChannel(channel Channel) {
 	defer i.Mutex.Unlock()
 
 	i.Channels[channel.ID] = channel
-	i.Invalidated = true
+	i.Stale = true
 }
 
 func (i *Index) DeleteChannel(id Snowflake) {
 	i.Mutex.Lock()
 	defer i.Mutex.Unlock()
 	delete(i.Channels, id)
-	i.Invalidated = true
-}
-
-func (i *Index) Invalidate() {
-	i.Invalidated = true
+	i.Stale = true
 }
 
 func (i *Index) GetPermissionsByUser(userID Snowflake) int {
 	info, ok := i.UserInfos[userID]
-	if !ok {
+	if !ok || info == nil {
 		return 0
 	}
-
 	return info.Permissions
 }
 

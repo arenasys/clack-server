@@ -487,7 +487,7 @@ func StartGateway(ctx *common.ClackContext) {
 
 	go func(ctx context.Context) {
 		for ctx.Err() == nil {
-			if gw.index.Invalidated {
+			if gw.index.Stale {
 
 				changes := gw.index.UpdateUserList()
 

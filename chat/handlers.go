@@ -334,10 +334,10 @@ func (c *GatewayConnection) HandleMessageSendRequest(msg *UnknownEvent, db *sqli
 		return
 	}
 
-	permissions := storage.NewTransaction(db).GetPermissionsByChannel(c.userID, req.ChannelID)
-	canSendMessages := permissions&PermissionSendMessages != 0
-	canEmbedLinks := permissions&PermissionEmbedLinks != 0
-	canUploadFiles := permissions&PermissionUploadFiles != 0
+	perms := storage.NewTransaction(db).GetPermissionsByChannel(c.userID, req.ChannelID)
+	canSendMessages := perms&PermissionSendMessages != 0
+	canEmbedLinks := perms&PermissionEmbedLinks != 0
+	canUploadFiles := perms&PermissionUploadFiles != 0
 
 	if !canSendMessages {
 		c.HandleError(NewError(ErrorCodeNoPermission, nil))
@@ -510,8 +510,8 @@ func (c *GatewayConnection) HandleMessageUpdateRequest(msg *UnknownEvent, db *sq
 		return
 	}
 
-	permissions := tx.GetPermissionsByChannel(c.userID, full.ChannelID)
-	canEmbedLinks := permissions&PermissionEmbedLinks != 0
+	perms := tx.GetPermissionsByChannel(c.userID, full.ChannelID)
+	canEmbedLinks := perms&PermissionEmbedLinks != 0
 
 	mentionedUsers, mentionedRoles, mentionedChannels, embeddableURLs := ParseMessageContent(req.Content)
 
@@ -587,8 +587,8 @@ func (c *GatewayConnection) HandleMessageDeleteRequest(msg *UnknownEvent, db *sq
 		return
 	} else {
 		if msg.AuthorID != c.userID {
-			var permissions = tx.GetPermissionsByChannel(c.userID, msg.ChannelID)
-			if permissions&PermissionManageMessages == 0 {
+			var perms = tx.GetPermissionsByChannel(c.userID, msg.ChannelID)
+			if perms&PermissionManageMessages == 0 {
 				err := NewError(ErrorCodeNoPermission, nil)
 				tx.Commit(err)
 				c.HandleError(err)
@@ -622,7 +622,7 @@ func (c *GatewayConnection) HandleMessageReactionAddRequest(msg *UnknownEvent, d
 	tx := storage.NewTransaction(db)
 	tx.Start()
 
-	permissions := tx.GetPermissionsByMessage(c.userID, req.MessageID)
+	perms := tx.GetPermissionsByMessage(c.userID, req.MessageID)
 
 	count, err := tx.GetReactionCount(req.MessageID, req.EmojiID)
 	if err != nil {
@@ -631,7 +631,7 @@ func (c *GatewayConnection) HandleMessageReactionAddRequest(msg *UnknownEvent, d
 		return
 	}
 
-	if count == 0 && permissions&PermissionAddReactions == 0 {
+	if count == 0 && perms&PermissionAddReactions == 0 {
 		err := NewError(ErrorCodeNoPermission, nil)
 		tx.Commit(err)
 		c.HandleError(err)
@@ -721,7 +721,7 @@ func (c *GatewayConnection) HandleUserUpdateRequest(msg *UnknownEvent, db *sqlit
 	tx := storage.NewTransaction(db)
 	tx.Start()
 	user, err := tx.GetUser(req.UserID)
-	permissions, _ := tx.GetPermissionsByUser(c.userID)
+	perms, _ := tx.GetPermissionsByUser(c.userID)
 	tx.Commit(nil)
 
 	if err != nil {
@@ -729,7 +729,7 @@ func (c *GatewayConnection) HandleUserUpdateRequest(msg *UnknownEvent, db *sqlit
 		return
 	}
 
-	if user.ID == c.userID && permissions&PermissionChangeProfile == 0 {
+	if user.ID == c.userID && perms&PermissionChangeProfile == 0 {
 		err := NewError(ErrorCodeNoPermission, nil)
 		c.HandleError(err)
 		return
@@ -737,13 +737,13 @@ func (c *GatewayConnection) HandleUserUpdateRequest(msg *UnknownEvent, db *sqlit
 
 	// Setting other peoples profile, narrow what is permitted (only reseting)
 	if user.ID != c.userID {
-		if permissions&PermissionManageProfiles == 0 {
+		if perms&PermissionManageProfiles == 0 {
 			err := NewError(ErrorCodeNoPermission, nil)
 			c.HandleError(err)
 			return
 		}
 
-		if permissions&PermissionAdministrator == 0 {
+		if perms&PermissionAdministrator == 0 {
 			if req.SetAvatar && req.AvatarModified != AvatarModifiedDefault {
 				err := NewError(ErrorCodeNoPermission, nil)
 				c.HandleError(err)

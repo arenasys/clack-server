@@ -1,3 +1,4 @@
 data/*
+.gocache
 go.sum
 main
