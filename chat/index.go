@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"math"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -49,8 +50,10 @@ type Index struct {
 	Channels  map[Snowflake]Channel
 	List      UserList
 	Settings  Settings
-	Stale     bool
-	Mutex     sync.RWMutex
+
+	Stale   bool
+	Mutex   sync.RWMutex
+	Changes []IndexRange
 }
 
 // Populates the index from the database (settings, roles, channels, users)
@@ -154,7 +157,17 @@ func (i *Index) SortUserList() {
 	gwLog.Printf("Index.SortUserList: user list updated in %v", time.Since(start))
 }
 
-func (i *Index) UpdateUserList() []IndexRange {
+func (i *Index) getUserGroup(u *User, ui *UserInfo) Snowflake {
+	if ui.Hoist != 0 {
+		return ui.Hoist
+	}
+	if u.IsOnline() {
+		return Snowflake(UserPresenceOnline)
+	}
+	return Snowflake(UserPresenceOffline)
+}
+
+func (i *Index) UpdateUserList() {
 	i.Mutex.RLock()
 
 	next := UserList{}
@@ -180,15 +193,8 @@ func (i *Index) UpdateUserList() []IndexRange {
 
 	for uid, u := range i.Users {
 		ui := i.UserInfos[uid]
-		if ui.Hoist != 0 {
-			next.Groups[ui.Hoist] = append(next.Groups[ui.Hoist], uid)
-		} else {
-			if u.IsOnline() {
-				next.Groups[onlineID] = append(next.Groups[onlineID], uid)
-			} else {
-				next.Groups[offlineID] = append(next.Groups[offlineID], uid)
-			}
-		}
+		group := i.getUserGroup(&u, ui)
+		next.Groups[group] = append(next.Groups[group], uid)
 	}
 
 	start_sort := time.Now()
@@ -268,8 +274,105 @@ func (i *Index) UpdateUserList() []IndexRange {
 	i.Mutex.Lock()
 	i.List = next
 	i.Stale = false
+	i.Changes = append(i.Changes, changes...)
 	i.Mutex.Unlock()
+}
 
+func (i *Index) RepositionUser(id Snowflake) {
+	start := time.Now()
+
+	user, ok := i.Users[id]
+	if !ok {
+		return
+	}
+
+	ui := i.UserInfos[id]
+
+	// remove from old group
+	var old_group Snowflake
+	var old_group_pos int = -1
+	for gid, arr := range i.List.Groups {
+		for j, uid := range arr {
+			if uid == id {
+				old_group = gid
+				old_group_pos = j
+				break
+			}
+		}
+		if old_group_pos != -1 {
+			break
+		}
+	}
+	if old_group_pos == -1 {
+		return
+	}
+	old_group_users := i.List.Groups[old_group]
+	old_group_users = append(old_group_users[:old_group_pos], old_group_users[old_group_pos+1:]...)
+	i.List.Groups[old_group] = old_group_users
+
+	// insert into new group
+	new_group := i.getUserGroup(&user, ui)
+	new_group_users := i.List.Groups[new_group]
+	new_group_pos := sort.Search(len(new_group_users), func(j int) bool {
+		other := i.Users[new_group_users[j]]
+		if c := strings.Compare(user.DisplayName, other.DisplayName); c != 0 {
+			return c < 0
+		}
+		return id < new_group_users[j]
+	})
+	new_group_users = append(new_group_users, 0)
+	copy(new_group_users[new_group_pos+1:], new_group_users[new_group_pos:])
+	new_group_users[new_group_pos] = id
+	i.List.Groups[new_group] = new_group_users
+
+	// find old view position
+	old_view_pos := -1
+	for idx, vid := range i.List.View {
+		if vid == id {
+			old_view_pos = idx
+			break
+		}
+	}
+
+	// rebuild view
+	new_view := make([]Snowflake, 0, len(i.Users)+len(i.List.GroupOrder))
+	for _, gid := range i.List.GroupOrder {
+		new_view = append(new_view, gid)
+		new_view = append(new_view, i.List.Groups[gid]...)
+	}
+	i.List.View = new_view
+
+	// find new view position
+	new_view_pos := -1
+	for idx, vid := range i.List.View {
+		if vid == id {
+			new_view_pos = idx
+			break
+		}
+	}
+	if new_view_pos == -1 {
+		gwLog.Printf("RepositionUser: user %v not in new view", id)
+		return
+	}
+	from := old_view_pos
+	to := new_view_pos
+	if from > to {
+		from, to = to, from
+	}
+	change := IndexRange{
+		From: from,
+		To:   to + 1,
+	}
+	i.Changes = append(i.Changes, change)
+
+	gwLog.Printf("RepositionUser: took %v", time.Since(start))
+}
+
+func (i *Index) PopAllChanges() []IndexRange {
+	i.Mutex.Lock()
+	defer i.Mutex.Unlock()
+	changes := i.Changes
+	i.Changes = nil
 	return changes
 }
 
@@ -385,7 +488,9 @@ func (i *Index) UpdateUser(user User) User {
 		i.UserInfos[user.ID] = &UserInfo{}
 	}
 	*i.UserInfos[user.ID] = i.computeUserInfo(user)
-	i.Stale = true
+
+	i.RepositionUser(user.ID)
+
 	return i.Users[user.ID]
 }
 

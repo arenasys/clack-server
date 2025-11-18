@@ -19,6 +19,9 @@ import (
 	"zombiezen.com/go/sqlite"
 )
 
+const IndexRebuildThrottle = time.Second
+const IndexPushThrottle = time.Millisecond * 250
+
 var gwLog = NewLogger("GATEWAY")
 
 var gwCtx context.Context
@@ -486,11 +489,22 @@ func StartGateway(ctx *common.ClackContext) {
 	}()
 
 	go func(ctx context.Context) {
+		// Update user list periodically if stale
 		for ctx.Err() == nil {
 			if gw.index.Stale {
+				gw.index.UpdateUserList()
+				time.Sleep(IndexRebuildThrottle)
+			} else {
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}(gwCtx)
 
-				changes := gw.index.UpdateUserList()
-
+	go func(ctx context.Context) {
+		// Push user list changes to clients
+		for ctx.Err() == nil {
+			changes := gw.index.PopAllChanges()
+			if len(changes) != 0 {
 				gw.connectionsMutex.RLock()
 				for _, c := range gw.connections {
 					last := c.lastUserListRange
@@ -506,14 +520,12 @@ func StartGateway(ctx *common.ClackContext) {
 					}
 				}
 				gw.connectionsMutex.RUnlock()
-
-				time.Sleep(1 * time.Second)
+				time.Sleep(IndexPushThrottle)
 			} else {
 				time.Sleep(time.Millisecond)
 			}
 		}
 	}(gwCtx)
-
 }
 
 func init() {
