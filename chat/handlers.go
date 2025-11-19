@@ -581,19 +581,20 @@ func (c *GatewayConnection) HandleMessageDeleteRequest(msg *UnknownEvent, db *sq
 	tx := storage.NewTransaction(db)
 	tx.Start()
 
-	if msg, err := tx.GetMessage(req.MessageID); err != nil {
+	msgRow, err := tx.GetMessage(req.MessageID)
+	if err != nil {
 		tx.Commit(err)
 		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
 		return
-	} else {
-		if msg.AuthorID != c.userID {
-			var perms = tx.GetPermissionsByChannel(c.userID, msg.ChannelID)
-			if perms&PermissionManageMessages == 0 {
-				err := NewError(ErrorCodeNoPermission, nil)
-				tx.Commit(err)
-				c.HandleError(err)
-				return
-			}
+	}
+
+	if msgRow.AuthorID != c.userID {
+		var perms = tx.GetPermissionsByChannel(c.userID, msgRow.ChannelID)
+		if perms&PermissionManageMessages == 0 {
+			err := NewError(ErrorCodeNoPermission, nil)
+			tx.Commit(err)
+			c.HandleError(err)
+			return
 		}
 	}
 
@@ -609,6 +610,7 @@ func (c *GatewayConnection) HandleMessageDeleteRequest(msg *UnknownEvent, db *sq
 		&MessageDeleteEvent{
 			MessageID: req.MessageID,
 		},
+		msgRow.ChannelID,
 	)
 }
 
@@ -623,6 +625,13 @@ func (c *GatewayConnection) HandleMessageReactionAddRequest(msg *UnknownEvent, d
 	tx.Start()
 
 	perms := tx.GetPermissionsByMessage(c.userID, req.MessageID)
+
+	channelID, err := tx.GetChannelByMessage(req.MessageID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
 
 	count, err := tx.GetReactionCount(req.MessageID, req.EmojiID)
 	if err != nil {
@@ -652,6 +661,7 @@ func (c *GatewayConnection) HandleMessageReactionAddRequest(msg *UnknownEvent, d
 			UserID:    c.userID,
 			EmojiID:   req.EmojiID,
 		},
+		channelID,
 	)
 }
 
@@ -664,6 +674,13 @@ func (c *GatewayConnection) HandleMessageReactionDeleteRequest(msg *UnknownEvent
 
 	tx := storage.NewTransaction(db)
 	tx.Start()
+
+	channelID, err := tx.GetChannelByMessage(req.MessageID)
+	if err != nil {
+		tx.Commit(err)
+		c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+		return
+	}
 
 	if err := tx.DeleteReaction(req.MessageID, c.userID, req.EmojiID); err != nil {
 		tx.Commit(err)
@@ -679,6 +696,7 @@ func (c *GatewayConnection) HandleMessageReactionDeleteRequest(msg *UnknownEvent
 			UserID:    c.userID,
 			EmojiID:   req.EmojiID,
 		},
+		channelID,
 	)
 }
 
@@ -879,11 +897,8 @@ func (c *GatewayConnection) TryEmbedURLs(id Snowflake, urls []string, db *sqlite
 
 	tx.Commit(nil)
 
-	gw.Relay(Event{
-		Type: EventTypeMessageUpdate,
-		Data: MessageUpdateEvent{
-			Message: message,
-		},
+	gw.OnMessageUpdate(&MessageUpdateEvent{
+		Message: message,
 	})
 }
 

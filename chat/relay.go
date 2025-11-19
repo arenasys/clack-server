@@ -1,8 +1,34 @@
 package chat
 
+import . "clack/common"
+
 func (gw *Gateway) Relay(event Event) {
 	go func() {
+		gw.connectionsMutex.RLock()
+		defer gw.connectionsMutex.RUnlock()
 		for _, conn := range gw.connections {
+			conn.Relay(&event)
+		}
+	}()
+}
+
+func (gw *Gateway) RelayByChannel(event Event, channelID Snowflake) {
+	go func() {
+		index := gw.GetIndex()
+
+		gw.connectionsMutex.RLock()
+		defer gw.connectionsMutex.RUnlock()
+
+		for _, conn := range gw.connections {
+			if !conn.Authenticated() {
+				continue
+			}
+
+			perms := index.GetPermissionsByChannel(conn.userID, channelID)
+			if perms&PermissionViewChannel == 0 {
+				continue
+			}
+
 			conn.Relay(&event)
 		}
 	}()
@@ -14,16 +40,16 @@ func (gw *Gateway) OnMessageAdd(msg *MessageAddEvent) {
 		Data: msg,
 	}
 
-	gw.Relay(event)
+	gw.RelayByChannel(event, msg.Message.ChannelID)
 }
 
-func (gw *Gateway) OnMessageDelete(msg *MessageDeleteEvent) {
+func (gw *Gateway) OnMessageDelete(msg *MessageDeleteEvent, channelID Snowflake) {
 	event := Event{
 		Type: EventTypeMessageDelete,
 		Data: msg,
 	}
 
-	gw.Relay(event)
+	gw.RelayByChannel(event, channelID)
 }
 
 func (gw *Gateway) OnMessageUpdate(msg *MessageUpdateEvent) {
@@ -32,25 +58,25 @@ func (gw *Gateway) OnMessageUpdate(msg *MessageUpdateEvent) {
 		Data: msg,
 	}
 
-	gw.Relay(event)
+	gw.RelayByChannel(event, msg.Message.ChannelID)
 }
 
-func (gw *Gateway) OnReactionAdd(msg *ReactionAddEvent) {
+func (gw *Gateway) OnReactionAdd(msg *ReactionAddEvent, channelID Snowflake) {
 	event := Event{
 		Type: EventTypeMessageReactionAdd,
 		Data: msg,
 	}
 
-	gw.Relay(event)
+	gw.RelayByChannel(event, channelID)
 }
 
-func (gw *Gateway) OnReactionDelete(msg *ReactionDeleteEvent) {
+func (gw *Gateway) OnReactionDelete(msg *ReactionDeleteEvent, channelID Snowflake) {
 	event := Event{
 		Type: EventTypeMessageReactionDelete,
 		Data: msg,
 	}
 
-	gw.Relay(event)
+	gw.RelayByChannel(event, channelID)
 }
 
 func (gw *Gateway) OnUserAdd(msg *UserAddEvent) {
