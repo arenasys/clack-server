@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 
 	"github.com/gorilla/mux"
 
@@ -21,14 +22,28 @@ func buildRouter() *mux.Router {
 	buildAPIRouter(r)
 	buildMediaRouter(r)
 
-	r.PathPrefix("/").Handler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		proxy := httputil.NewSingleHostReverseProxy(&url.URL{
-			Scheme: "http",
-			Host:   "localhost:5173",
-		})
-		req.Host = "localhost:5173"
-		proxy.ServeHTTP(w, req)
-	}))
+	distDir := "/var/www/clack"
+	if _, err := http.Dir(distDir).Open("index.html"); err == nil {
+		fileServer := http.FileServer(http.Dir(distDir))
+		r.PathPrefix("/").Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			f, err := http.Dir(distDir).Open(r.URL.Path)
+			if err == nil {
+				f.Close()
+				fileServer.ServeHTTP(w, r)
+				return
+			}
+			http.ServeFile(w, r, filepath.Join(distDir, "index.html"))
+		}))
+	} else {
+		r.PathPrefix("/").Handler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			proxy := httputil.NewSingleHostReverseProxy(&url.URL{
+				Scheme: "http",
+				Host:   "localhost:5173",
+			})
+			req.Host = "localhost:5173"
+			proxy.ServeHTTP(w, req)
+		}))
+	}
 
 	return r
 }

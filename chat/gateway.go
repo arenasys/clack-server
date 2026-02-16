@@ -254,7 +254,9 @@ func (c *GatewayConnection) Introduction(token string) {
 	db, _ := storage.OpenConnection(c.ctx)
 	defer storage.CloseConnection(db)
 
-	c.TryAuthenticate(token, db)
+	if token != "" {
+		c.TryAuthenticate(token, db)
+	}
 	c.HandleSettingsRequest(db)
 
 	if c.Authenticated() {
@@ -283,7 +285,7 @@ func (c *GatewayConnection) Process() {
 			c.HandleRegisterRequest(msg, db)
 			break
 		default:
-			c.HandleError(NewError(ErrorCodeInvalidRequest, nil))
+			c.HandleError(NewError(ErrorCodeInvalidToken, nil))
 		}
 	} else {
 		switch msg.Type {

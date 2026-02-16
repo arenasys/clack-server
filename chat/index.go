@@ -232,7 +232,7 @@ func (i *Index) UpdateUserList() {
 		next.View = append(next.View, next.Groups[gid]...)
 	}
 
-	var changes []IndexRange
+	var changes []IndexRange = []IndexRange{}
 	var start int = -1
 
 	for idx := 0; idx < len(i.List.View); idx++ {
@@ -459,7 +459,7 @@ func (i *Index) GetUser(id Snowflake) (User, bool) {
 func (i *Index) GetUsers(ids []Snowflake) []User {
 	i.Mutex.RLock()
 	defer i.Mutex.RUnlock()
-	var users []User
+	users := []User{}
 	for _, id := range ids {
 		if user, ok := i.Users[id]; ok {
 			users = append(users, user)
@@ -512,7 +512,7 @@ func (i *Index) GetRole(id Snowflake) (Role, bool) {
 func (i *Index) GetAllRoles() []Role {
 	i.Mutex.RLock()
 	defer i.Mutex.RUnlock()
-	var roles []Role
+	roles := []Role{}
 	for _, role := range i.Roles {
 		roles = append(roles, role)
 	}
@@ -552,7 +552,7 @@ func (i *Index) GetChannel(id Snowflake) (Channel, bool) {
 func (i *Index) GetAllChannels() []Channel {
 	i.Mutex.RLock()
 	defer i.Mutex.RUnlock()
-	var channels []Channel
+	channels := []Channel{}
 	for _, channel := range i.Channels {
 		channels = append(channels, channel)
 	}

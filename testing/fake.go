@@ -79,7 +79,7 @@ func PopulateDatabase(ctx context.Context) {
 	}
 	tx.Commit(nil)
 
-	const userCount = 100000
+	const userCount = 1000
 	users := [userCount]Snowflake{}
 
 	tx.Start()
