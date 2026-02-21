@@ -100,19 +100,25 @@ func UploadAttachment(messageID Snowflake, attachmentID Snowflake, filename stri
 	}
 
 	var previews *Previews = nil
-	if typ != AttachmentTypeFile {
-		file.Seek(0, io.SeekStart)
-		previews, err = CreatePreviews(file, false)
-		if typ == AttachmentTypeImage && mimeType == "image/gif" {
-			file.Seek(0, io.SeekStart)
-			CreateAnimatedPreview(file, previews)
-		}
-		if err != nil {
-			fmt.Println("Failed to generate previews:", err)
-			typ = AttachmentTypeFile
+	if attachment.Type != AttachmentTypeFile {
+		if absPath, err := filepath.Abs(filepath.Join(DataFolder, path)); err != nil {
+			fmt.Println("Failed to get absolute path:", err)
+			attachment.Type = AttachmentTypeFile
 		} else {
-			attachment.Width = previews.Width
-			attachment.Height = previews.Height
+			if previews, err = CreatePreviews(nil, absPath); err != nil {
+				fmt.Println("Failed to generate previews:", err)
+				attachment.Type = AttachmentTypeFile
+			} else {
+				if attachment.Type == AttachmentTypeImage && mimeType == "image/gif" {
+					if animated, err := CreateAnimatedPreview(nil, absPath); err == nil {
+						previews.Display = animated
+					} else {
+						fmt.Println("Failed to generate animated preview:", err)
+					}
+				}
+				attachment.Width = previews.Width
+				attachment.Height = previews.Height
+			}
 		}
 	}
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -62,7 +63,10 @@ func attachmentHandler(w http.ResponseWriter, r *http.Request) {
 	//attch.Modified = time.Now()
 
 	w.Header().Set("Content-Type", attch.Mimetype)
-	w.Header().Set("Content-Disposition", "inline; filename="+attch.Name)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(
+		`inline; filename*=UTF-8''%s`,
+		url.PathEscape(attachmentName),
+	))
 
 	http.ServeContent(w, r, attch.Name, attch.Modified, attch.Content)
 

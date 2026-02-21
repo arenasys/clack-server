@@ -7,12 +7,12 @@ import (
 	"os/exec"
 )
 
-func runFFmpegOnTmpFile(args []string, tmpPath string) ([]byte, error) {
+func runFFmpegOnFile(args []string, path string) ([]byte, error) {
 
 	var cmd *exec.Cmd
 	var err error
-	if true {
-		cmd, err = sandboxFFmpegCommand(tmpPath, args...)
+	if _, err = exec.LookPath("nsjail"); err == nil {
+		cmd, err = sandboxFFmpegCommand(path, args...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create sandbox command: %v", err)
 		}
@@ -33,11 +33,11 @@ func runFFmpegOnTmpFile(args []string, tmpPath string) ([]byte, error) {
 	return outputBuffer.Bytes(), nil
 }
 
-func runFFmpegOnReader(args []string, reader io.Reader) ([]byte, error) {
+func runFFmpegOnStream(args []string, stream io.Reader) ([]byte, error) {
 
 	var cmd *exec.Cmd
 	var err error
-	if true {
+	if _, err = exec.LookPath("nsjail"); err == nil {
 		cmd, err = sandboxFFmpegCommand("", args...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create sandbox command: %v", err)
@@ -61,7 +61,7 @@ func runFFmpegOnReader(args []string, reader io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("%s: %s", err, errorBuffer.String())
 	}
 
-	io.Copy(stdinPipe, reader)
+	io.Copy(stdinPipe, stream)
 
 	stdinPipe.Close()
 
@@ -72,7 +72,7 @@ func runFFmpegOnReader(args []string, reader io.Reader) ([]byte, error) {
 	return outputBuffer.Bytes(), nil
 }
 
-func runFFprobeOnReader(args []string, reader io.Reader) (string, error) {
+func runFFprobeOnStream(args []string, stream io.Reader) (string, error) {
 	cmd := exec.Command("ffprobe", args...)
 
 	stdinPipe, err := cmd.StdinPipe()
@@ -90,7 +90,7 @@ func runFFprobeOnReader(args []string, reader io.Reader) (string, error) {
 		return "", fmt.Errorf("%s: %s", err, errorBuffer.String())
 	}
 
-	io.Copy(stdinPipe, reader)
+	io.Copy(stdinPipe, stream)
 	stdinPipe.Close()
 
 	if err := cmd.Wait(); err != nil {

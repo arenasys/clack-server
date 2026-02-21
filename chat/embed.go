@@ -430,7 +430,7 @@ func GetImagePreviews(ctx context.Context, messageID, id Snowflake, url string) 
 		return nil, fmt.Errorf("failed to get content: %w", err)
 	}
 
-	previews, err := storage.CreatePreviews(content, false)
+	previews, err := storage.CreatePreviews(content, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create previews: %w", err)
 	}
@@ -460,7 +460,7 @@ func GetVideoPreviews(ctx context.Context, messageID, embedID Snowflake, url str
 
 	reader := io.TeeReader(content, cache)
 
-	previews, err := storage.CreatePreviews(reader, false)
+	previews, err := storage.CreatePreviews(reader, "")
 
 	cache.Close()
 	content.Close()

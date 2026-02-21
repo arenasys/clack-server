@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"os"
 )
 
 type Previews struct {
@@ -15,10 +14,10 @@ type Previews struct {
 	Preload []byte
 }
 
-func GetOriginal(content io.Reader, useTemp bool) ([]byte, error) {
-	commonArgs := []string{
+func GetOriginal(stream io.Reader, path string) ([]byte, error) {
+	args := []string{
 		"-threads", "1",
-		"-i", "-",
+		"-i", "",
 		"-vframes", "1",
 		"-quality", "100",
 		"-c:v", "libwebp",
@@ -26,21 +25,12 @@ func GetOriginal(content io.Reader, useTemp bool) ([]byte, error) {
 		"-",
 	}
 
-	if useTemp {
-		tmp, err := os.CreateTemp("", "ffmpeg-")
-		if err != nil {
-			return nil, fmt.Errorf("create temp file: %v", err)
-		}
-		tmpPath := tmp.Name()
-		_, err = io.Copy(tmp, content)
-		if err != nil {
-			return nil, fmt.Errorf("copy to temp file: %v", err)
-		}
-		commonArgs[1] = tmpPath
-		return runFFmpegOnTmpFile(commonArgs, tmpPath)
-
+	if path != "" {
+		args[3] = path
+		return runFFmpegOnFile(args, path)
 	} else {
-		return runFFmpegOnReader(commonArgs, content)
+		args[3] = "-"
+		return runFFmpegOnStream(args, stream)
 	}
 }
 
@@ -53,7 +43,7 @@ func GetDimensions(content io.Reader, p *Previews) error {
 		"-",
 	}
 
-	probeOutput, err := runFFprobeOnReader(probeArgs, content)
+	probeOutput, err := runFFprobeOnStream(probeArgs, content)
 	if err != nil {
 		return fmt.Errorf("ffprobe: %v", err)
 	}
@@ -72,27 +62,8 @@ func GetDimensions(content io.Reader, p *Previews) error {
 	return nil
 }
 
-func CreateAnimatedPreview(content io.ReadSeeker, p *Previews) error {
-	animatedArgs := []string{
-		"-i", "-",
-		"-c:v", "libwebp_anim",
-		"-loop", "0",
-		"-f", "image2pipe",
-		"-vf", "scale=w='min(iw,550)':h='min(ih,550)':force_original_aspect_ratio=increase",
-		"-",
-	}
-
-	animatedData, err := runFFmpegOnReader(animatedArgs, content)
-	if err != nil {
-		return fmt.Errorf("get animated preview: %v", err)
-	}
-
-	p.Display = animatedData
-	return nil
-}
-
-func CreatePreviews(content io.Reader, useTemp bool) (*Previews, error) {
-	original, err := GetOriginal(content, useTemp)
+func CreatePreviews(stream io.Reader, path string) (*Previews, error) {
+	original, err := GetOriginal(stream, path)
 	if err != nil {
 		return nil, fmt.Errorf("GetOriginal: %v", err)
 	}
@@ -116,7 +87,7 @@ func CreatePreviews(content io.Reader, useTemp bool) (*Previews, error) {
 		"-vf", "scale=w='min(iw,1200)':h='min(ih,1200)':force_original_aspect_ratio=decrease", "-",
 	)
 
-	p.Display, err = runFFmpegOnReader(displayArgs, bytes.NewReader(original))
+	p.Display, err = runFFmpegOnStream(displayArgs, bytes.NewReader(original))
 	if err != nil {
 		return nil, fmt.Errorf("get display: %v", err)
 	}
@@ -125,7 +96,7 @@ func CreatePreviews(content io.Reader, useTemp bool) (*Previews, error) {
 		"-vf", "scale=w='min(iw,350)':h='min(ih,350)':force_original_aspect_ratio=increase", "-",
 	)
 
-	p.Thumb, err = runFFmpegOnReader(thumbArgs, bytes.NewReader(p.Display))
+	p.Thumb, err = runFFmpegOnStream(thumbArgs, bytes.NewReader(p.Display))
 	if err != nil {
 		return nil, fmt.Errorf("get thumb: %v", err)
 	}
@@ -134,12 +105,31 @@ func CreatePreviews(content io.Reader, useTemp bool) (*Previews, error) {
 		"-vf", "huesaturation=intensity=1,boxblur=32,scale=w='min(iw,32)':h='min(ih,32)':force_original_aspect_ratio=decrease", "-",
 	)
 
-	p.Preload, err = runFFmpegOnReader(preloadArgs, bytes.NewReader(p.Thumb))
+	p.Preload, err = runFFmpegOnStream(preloadArgs, bytes.NewReader(p.Thumb))
 	if err != nil {
 		return nil, fmt.Errorf("get preload: %v", err)
 	}
 
 	return &p, nil
+}
+
+func CreateAnimatedPreview(stream io.Reader, path string) ([]byte, error) {
+	args := []string{
+		"-i", "",
+		"-c:v", "libwebp_anim",
+		"-loop", "0",
+		"-f", "image2pipe",
+		"-vf", "scale=w='min(iw,550)':h='min(ih,550)':force_original_aspect_ratio=increase",
+		"-",
+	}
+
+	if path != "" {
+		args[1] = path
+		return runFFmpegOnFile(args, path)
+	} else {
+		args[1] = "-"
+		return runFFmpegOnStream(args, stream)
+	}
 }
 
 type Avatar struct {
@@ -162,13 +152,13 @@ func CreateAvatar(content io.Reader) (*Avatar, error) {
 	}
 
 	displayArgs := append(commonArgs, "-vf", "scale=256:256", "-")
-	a.Display, err = runFFmpegOnReader(displayArgs, content)
+	a.Display, err = runFFmpegOnStream(displayArgs, content)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create display avatar: %w", err)
 	}
 
 	thumbArgs := append(commonArgs, "-vf", "scale=96:96", "-")
-	a.Thumb, err = runFFmpegOnReader(thumbArgs, bytes.NewReader(a.Display))
+	a.Thumb, err = runFFmpegOnStream(thumbArgs, bytes.NewReader(a.Display))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create thumb avatar: %w", err)
 	}
