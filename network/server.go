@@ -26,13 +26,11 @@ func buildRouter() *mux.Router {
 	if _, err := http.Dir(distDir).Open("index.html"); err == nil {
 		fileServer := http.FileServer(http.Dir(distDir))
 		r.PathPrefix("/").Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			f, err := http.Dir(distDir).Open(r.URL.Path)
-			if err == nil {
-				f.Close()
-				fileServer.ServeHTTP(w, r)
+			if r.URL.Path == "/" {
+				http.ServeFile(w, r, filepath.Join(distDir, "index.html"))
 				return
 			}
-			http.ServeFile(w, r, filepath.Join(distDir, "index.html"))
+			fileServer.ServeHTTP(w, r)
 		}))
 	} else {
 		r.PathPrefix("/").Handler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
